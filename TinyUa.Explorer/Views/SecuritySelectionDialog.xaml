@@ -1,0 +1,107 @@
+<ui:FluentWindow x:Class="TinyUa.Explorer.Views.SecuritySelectionDialog"
+                 xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+                 xmlns:conv="clr-namespace:TinyUa.Explorer.Converters"
+                 Title="Security Settings"
+                 Width="560" Height="560"
+                 WindowStartupLocation="CenterOwner"
+                 ResizeMode="NoResize"
+                 ExtendsContentIntoTitleBar="False">
+
+    <ui:FluentWindow.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+        <conv:InverseBooleanConverter x:Key="InverseBooleanConverter" />
+    </ui:FluentWindow.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Row 0: Title -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,12">
+            <ui:TextBlock FontTypography="BodyStrong" Text="Endpoint Security" />
+            <ui:TextBlock Text="{Binding Url, StringFormat='Discovering endpoints for: {0}'}"
+                          Foreground="{DynamicResource TextFillColorSecondaryBrush}"
+                          FontTypography="Caption"
+                          TextTrimming="CharacterEllipsis"
+                          Margin="0,2,0,0" />
+        </StackPanel>
+
+        <!-- Row 1: Endpoint list with discovery overlay -->
+        <Grid Grid.Row="1" Margin="0,0,0,12">
+            <ListBox ItemsSource="{Binding Endpoints}"
+                     SelectedItem="{Binding SelectedEndpoint}"
+                     DisplayMemberPath="DisplayText"
+                     IsEnabled="{Binding IsDiscovering, Converter={StaticResource InverseBooleanConverter}}"
+                     Background="Transparent"
+                     BorderThickness="1"
+                     Padding="4" />
+
+            <!-- Discovery progress overlay -->
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Visibility="{Binding IsDiscovering, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <ui:ProgressRing IsIndeterminate="True" Width="36" Height="36" />
+                <ui:TextBlock Text="Discovering endpoints..."
+                              Margin="0,8,0,0"
+                              HorizontalAlignment="Center"
+                              Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+        </Grid>
+
+        <!-- Row 2: Identity configuration -->
+        <StackPanel Grid.Row="2" Margin="0,0,0,12">
+            <ui:TextBlock FontTypography="BodyStrong" Text="User Identity" Margin="0,0,0,6" />
+
+            <ComboBox ItemsSource="{Binding AvailableTokenTypes}"
+                      SelectedItem="{Binding SelectedTokenType}"
+                      Margin="0,0,0,8"
+                      Padding="6,4" />
+
+            <!-- Username / Password (visible only for UserName token) -->
+            <StackPanel Visibility="{Binding NeedsCredentials, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <ui:TextBox Text="{Binding Username, UpdateSourceTrigger=PropertyChanged}"
+                            PlaceholderText="Username"
+                            Margin="0,0,0,6" />
+                <PasswordBox x:Name="PwdBox"
+                             PasswordChar="•"
+                             Padding="6,4"
+                             Margin="0,0,0,6" />
+            </StackPanel>
+
+            <!-- None + UserName warning -->
+            <ui:TextBlock Visibility="{Binding IsNoneWithUserName, Converter={StaticResource BooleanToVisibilityConverter}}"
+                          Text="⚠ None policy does not encrypt — the password will be sent in cleartext."
+                          TextWrapping="Wrap"
+                          Foreground="#FF9800"
+                          FontTypography="Caption"
+                          Margin="0,4,0,0" />
+
+            <!-- Discovery error -->
+            <ui:TextBlock Visibility="{Binding HasError, Converter={StaticResource BooleanToVisibilityConverter}}"
+                          Text="{Binding ErrorMessage}"
+                          TextWrapping="Wrap"
+                          Foreground="#F44336"
+                          FontTypography="Caption"
+                          Margin="0,4,0,0" />
+        </StackPanel>
+
+        <!-- Row 3: Buttons -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <ui:Button Content="Cancel"
+                       Appearance="Secondary"
+                       Command="{Binding CancelCommand}"
+                       Padding="20,4"
+                       Margin="0,0,8,0" />
+            <ui:Button Content="OK"
+                       Appearance="Primary"
+                       Command="{Binding OkCommand}"
+                       Padding="20,4" />
+        </StackPanel>
+    </Grid>
+</ui:FluentWindow>

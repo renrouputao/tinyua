@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>TinyUa.Core.Transport</RootNamespace>
+    <AssemblyName>TinyUa.Transport</AssemblyName>
+    <Description>OPC UA Transport Layer - Message Chunking and Secure Connection</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TinyUa.Core\TinyUa.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TinyUa.Client" />
+    <InternalsVisibleTo Include="TinyUa.Security.Tests" />
+  </ItemGroup>
+
+</Project>

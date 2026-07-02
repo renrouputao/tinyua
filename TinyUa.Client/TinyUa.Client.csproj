@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>TinyUa.Core.Client</RootNamespace>
+    <AssemblyName>TinyUa.Client</AssemblyName>
+    <Description>OPC UA Client Library</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TinyUa.Transport\TinyUa.Transport.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="TinyUa.Client.Tests" />
+    <InternalsVisibleTo Include="TinyUa.Benchmarks" />
+    <InternalsVisibleTo Include="TinyUa.Security.Tests" />
+  </ItemGroup>
+
+</Project>

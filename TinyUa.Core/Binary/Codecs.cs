@@ -1,0 +1,452 @@
+using System;
+using TinyUa.Core.Binary;
+using TinyUa.Core.Types;
+
+namespace TinyUa.Core.Binary
+{
+    public static class NodeIdCodec
+    {
+        public static void Encode(BinaryEncoder encoder, NodeId? nodeId)
+        {
+            if (nodeId == null)
+            {
+                encoder.WriteByte((byte)NodeIdType.TwoByte);
+                encoder.WriteByte(0);
+                return;
+            }
+
+            bool hasNamespaceUri = !string.IsNullOrEmpty(nodeId.NamespaceUri);
+            bool hasServerIndex = nodeId.ServerIndex > 0;
+
+            if (!hasNamespaceUri && !hasServerIndex)
+            {
+                switch (nodeId.NodeIdType)
+                {
+                    case NodeIdType.TwoByte:
+                        encoder.WriteByte((byte)NodeIdType.TwoByte);
+                        encoder.WriteByte((byte)nodeId.Identifier!);
+                        return;
+                    case NodeIdType.FourByte:
+                        encoder.WriteByte((byte)NodeIdType.FourByte);
+                        encoder.WriteByte((byte)nodeId.NamespaceIndex);
+                        encoder.WriteUInt16((ushort)nodeId.Identifier!);
+                        return;
+                    case NodeIdType.Numeric:
+                        encoder.WriteByte((byte)NodeIdType.Numeric);
+                        encoder.WriteUInt16(nodeId.NamespaceIndex);
+                        encoder.WriteUInt32((uint)nodeId.Identifier!);
+                        return;
+                }
+            }
+
+            byte encodingByte = (byte)nodeId.NodeIdType;
+            if (hasNamespaceUri) encodingByte |= 0x80;
+            if (hasServerIndex) encodingByte |= 0x40;
+            encoder.WriteByte(encodingByte);
+
+            switch (nodeId.NodeIdType)
+            {
+                case NodeIdType.TwoByte:
+                    encoder.WriteByte((byte)nodeId.Identifier!);
+                    break;
+                case NodeIdType.FourByte:
+                    encoder.WriteByte((byte)nodeId.NamespaceIndex);
+                    encoder.WriteUInt16((ushort)nodeId.Identifier!);
+                    break;
+                case NodeIdType.Numeric:
+                    encoder.WriteUInt16(nodeId.NamespaceIndex);
+                    encoder.WriteUInt32((uint)nodeId.Identifier!);
+                    break;
+                case NodeIdType.String:
+                    encoder.WriteUInt16(nodeId.NamespaceIndex);
+                    encoder.WriteString((string?)nodeId.Identifier ?? "");
+                    break;
+                case NodeIdType.ByteString:
+                    encoder.WriteUInt16(nodeId.NamespaceIndex);
+                    encoder.WriteByteString((byte[]?)nodeId.Identifier);
+                    break;
+                case NodeIdType.Guid:
+                    encoder.WriteUInt16(nodeId.NamespaceIndex);
+                    encoder.WriteGuid((Guid)nodeId.Identifier!);
+                    break;
+                default:
+                    throw new UaException(0x80000000, $"Unknown NodeIdType: {nodeId.NodeIdType}");
+            }
+
+            if (hasNamespaceUri)
+            {
+                encoder.WriteString(nodeId.NamespaceUri ?? "");
+            }
+
+            if (hasServerIndex)
+            {
+                encoder.WriteUInt32(nodeId.ServerIndex);
+            }
+        }
+
+        public static NodeId Decode(BinaryDecoder decoder)
+        {
+            var encodingByte = decoder.ReadByte();
+            var type = (NodeIdType)(encodingByte & 0x3F);
+
+            NodeId nodeId;
+
+            switch (type)
+            {
+                case NodeIdType.TwoByte:
+                    nodeId = new NodeId(decoder.ReadByte());
+                    break;
+
+                case NodeIdType.FourByte:
+                    var ns4 = decoder.ReadByte();
+                    var id4 = decoder.ReadUInt16();
+                    nodeId = new NodeId(id4, ns4);
+                    break;
+
+                case NodeIdType.Numeric:
+                    var nsNum = decoder.ReadUInt16();
+                    var idNum = decoder.ReadUInt32();
+                    nodeId = new NodeId(idNum, nsNum);
+                    break;
+
+                case NodeIdType.String:
+                    var nsStr = decoder.ReadUInt16();
+                    var idStr = decoder.ReadString();
+                    nodeId = new NodeId(idStr!, nsStr);
+                    break;
+
+                case NodeIdType.ByteString:
+                    var nsBs = decoder.ReadUInt16();
+                    var idBs = decoder.ReadByteString();
+                    nodeId = new NodeId(idBs!, nsBs);
+                    break;
+
+                case NodeIdType.Guid:
+                    var nsGuid = decoder.ReadUInt16();
+                    var idGuid = decoder.ReadGuid();
+                    nodeId = new NodeId(idGuid, nsGuid);
+                    break;
+
+                default:
+                    throw new UaException(0x80000000, $"Unknown NodeIdType: {type}");
+            }
+
+            if ((encodingByte & 0x80) != 0)
+            {
+                nodeId.NamespaceUri = decoder.ReadString();
+            }
+
+            if ((encodingByte & 0x40) != 0)
+            {
+                nodeId.ServerIndex = decoder.ReadUInt32();
+            }
+
+            return nodeId;
+        }
+    }
+
+    public static class VariantCodec
+    {
+        public static void Encode(BinaryEncoder encoder, Variant? variant)
+        {
+            if (variant == null || variant.VariantType == VariantType.Null)
+            {
+                encoder.WriteByte((byte)VariantType.Null);
+                return;
+            }
+
+            byte encodingByte = (byte)variant.VariantType;
+
+            if (variant.IsArray)
+            {
+                encodingByte |= 0x80;
+                if (variant.Dimensions != null && variant.Dimensions.Length > 0)
+                {
+                    encodingByte |= 0x40;
+                }
+            }
+
+            encoder.WriteByte(encodingByte);
+
+            if (variant.IsArray)
+            {
+                EncodeArrayValue(encoder, variant);
+                if (variant.Dimensions != null && variant.Dimensions.Length > 0)
+                {
+                    foreach (var dim in variant.Dimensions)
+                    {
+                        encoder.WriteInt32(dim);
+                    }
+                }
+            }
+            else
+            {
+                EncodeScalarValue(encoder, variant);
+            }
+        }
+
+        private static void EncodeScalarValue(BinaryEncoder encoder, Variant variant)
+        {
+                switch (variant.VariantType)
+                {
+                    case VariantType.Boolean:
+                        encoder.WriteBoolean((bool)variant.Value!);
+                        break;
+                    case VariantType.SByte:
+                        encoder.WriteSByte((sbyte)variant.Value!);
+                        break;
+                    case VariantType.Byte:
+                        encoder.WriteByte((byte)variant.Value!);
+                        break;
+                    case VariantType.Int16:
+                        encoder.WriteInt16((short)variant.Value!);
+                        break;
+                    case VariantType.UInt16:
+                        encoder.WriteUInt16((ushort)variant.Value!);
+                        break;
+                    case VariantType.Int32:
+                        encoder.WriteInt32((int)variant.Value!);
+                        break;
+                    case VariantType.UInt32:
+                        encoder.WriteUInt32((uint)variant.Value!);
+                        break;
+                    case VariantType.Int64:
+                        encoder.WriteInt64((long)variant.Value!);
+                        break;
+                    case VariantType.UInt64:
+                        encoder.WriteUInt64((ulong)variant.Value!);
+                        break;
+                    case VariantType.Float:
+                        encoder.WriteFloat((float)variant.Value!);
+                        break;
+                    case VariantType.Double:
+                        encoder.WriteDouble((double)variant.Value!);
+                        break;
+                    case VariantType.String:
+                        encoder.WriteString((string?)variant.Value);
+                        break;
+                    case VariantType.DateTime:
+                        encoder.WriteDateTime((DateTime)variant.Value!);
+                        break;
+                    case VariantType.Guid:
+                        encoder.WriteGuid((Guid)variant.Value!);
+                        break;
+                    case VariantType.ByteString:
+                        encoder.WriteByteString((byte[]?)variant.Value);
+                        break;
+                    case VariantType.NodeId:
+                    case VariantType.ExpandedNodeId:
+                        NodeIdCodec.Encode(encoder, (NodeId)variant.Value!);
+                        break;
+                    case VariantType.StatusCode:
+                        encoder.WriteUInt32(((StatusCode)variant.Value!).Value);
+                        break;
+                    case VariantType.QualifiedName:
+                        ((QualifiedName)variant.Value!).Encode(encoder);
+                        break;
+                    case VariantType.LocalizedText:
+                        ((LocalizedText)variant.Value!).Encode(encoder);
+                        break;
+                    case VariantType.ExtensionObject:
+                        ((ExtensionObject)variant.Value!).Encode(encoder);
+                        break;
+                    case VariantType.DataValue:
+                        ((DataValue)variant.Value!).Encode(encoder);
+                        break;
+                    default:
+                        throw new UaException(0x80000000, $"Unsupported VariantType: {variant.VariantType}");
+                }
+            }
+
+        private static void EncodeArrayValue(BinaryEncoder encoder, Variant variant)
+        {
+                var array = (Array)variant.Value!;
+                var length = array.Length;
+
+                encoder.WriteInt32(length);
+
+                for (int i = 0; i < length; i++)
+                {
+                    var item = array.GetValue(i);
+                    EncodeScalarValue(encoder, new Variant(item, variant.VariantType));
+                }
+            }
+
+        public static Variant Decode(BinaryDecoder decoder)
+        {
+            var encodingByte = decoder.ReadByte();
+            var type = (VariantType)(encodingByte & 0x3F);
+            bool isArray = (encodingByte & 0x80) != 0;
+            bool hasDimensions = (encodingByte & 0x40) != 0;
+
+            if (type == VariantType.Null)
+            {
+                return Variant.Null;
+            }
+
+            object? value;
+
+            if (isArray)
+            {
+                value = DecodeArrayValue(decoder, type);
+            }
+            else
+            {
+                value = DecodeScalarValue(decoder, type);
+            }
+
+            int[]? dimensions = null;
+            if (hasDimensions)
+            {
+                var dimCount = decoder.ReadInt32();
+                dimensions = new int[dimCount];
+                for (int i = 0; i < dimCount; i++)
+                {
+                    dimensions[i] = decoder.ReadInt32();
+                }
+            }
+
+            return new Variant(value, type) { Dimensions = dimensions, IsArray = isArray };
+        }
+
+        private static object DecodeScalarValue(BinaryDecoder decoder, VariantType type)
+        {
+            return type switch
+            {
+                VariantType.Boolean => decoder.ReadBoolean(),
+                VariantType.SByte => decoder.ReadSByte(),
+                VariantType.Byte => decoder.ReadByte(),
+                VariantType.Int16 => decoder.ReadInt16(),
+                VariantType.UInt16 => decoder.ReadUInt16(),
+                VariantType.Int32 => decoder.ReadInt32(),
+                VariantType.UInt32 => decoder.ReadUInt32(),
+                VariantType.Int64 => decoder.ReadInt64(),
+                VariantType.UInt64 => decoder.ReadUInt64(),
+                VariantType.Float => decoder.ReadFloat(),
+                VariantType.Double => decoder.ReadDouble(),
+                VariantType.String => decoder.ReadString()!,
+                VariantType.DateTime => decoder.ReadDateTime(),
+                VariantType.Guid => decoder.ReadGuid(),
+                VariantType.ByteString => decoder.ReadByteString()!,
+                VariantType.NodeId or VariantType.ExpandedNodeId => NodeIdCodec.Decode(decoder),
+                VariantType.StatusCode => new StatusCode(decoder.ReadUInt32()),
+                VariantType.QualifiedName => QualifiedName.Decode(decoder),
+                VariantType.LocalizedText => LocalizedText.Decode(decoder),
+                VariantType.ExtensionObject => ExtensionObject.Decode(decoder),
+                VariantType.DataValue => DataValue.Decode(decoder),
+                _ => throw new UaException(0x80000000, $"Unsupported VariantType: {type}")
+            };
+        }
+
+        private static Array DecodeArrayValue(BinaryDecoder decoder, VariantType type)
+        {
+            var length = decoder.ReadInt32();
+            if (length < 0)
+                return Array.Empty<object>();
+
+            var elementType = GetElementType(type);
+            var array = Array.CreateInstance(elementType, length);
+
+            for (int i = 0; i < length; i++)
+            {
+                array.SetValue(DecodeScalarValue(decoder, type), i);
+            }
+
+            return array;
+        }
+
+        private static Type GetElementType(VariantType type)
+        {
+            return type switch
+            {
+                VariantType.Boolean => typeof(bool),
+                VariantType.SByte => typeof(sbyte),
+                VariantType.Byte => typeof(byte),
+                VariantType.Int16 => typeof(short),
+                VariantType.UInt16 => typeof(ushort),
+                VariantType.Int32 => typeof(int),
+                VariantType.UInt32 => typeof(uint),
+                VariantType.Int64 => typeof(long),
+                VariantType.UInt64 => typeof(ulong),
+                VariantType.Float => typeof(float),
+                VariantType.Double => typeof(double),
+                VariantType.String => typeof(string),
+                VariantType.DateTime => typeof(DateTime),
+                VariantType.Guid => typeof(Guid),
+                VariantType.ByteString => typeof(byte[]),
+                VariantType.NodeId or VariantType.ExpandedNodeId => typeof(NodeId),
+                VariantType.StatusCode => typeof(StatusCode),
+                VariantType.QualifiedName => typeof(QualifiedName),
+                VariantType.LocalizedText => typeof(LocalizedText),
+                VariantType.ExtensionObject => typeof(ExtensionObject),
+                VariantType.DataValue => typeof(DataValue),
+                _ => typeof(object)
+            };
+        }
+    }
+
+    public static class ExpandedNodeIdCodec
+    {
+        public static void Encode(BinaryEncoder encoder, ExpandedNodeId nodeId)
+        {
+            NodeIdCodec.Encode(encoder, nodeId);
+        }
+
+        public static ExpandedNodeId Decode(BinaryDecoder decoder)
+        {
+            var nodeId = NodeIdCodec.Decode(decoder);
+            var expanded = new ExpandedNodeId();
+            expanded.SetFrom(nodeId);
+            return expanded;
+        }
+    }
+
+    public static class QualifiedNameCodec
+    {
+        public static void Encode(BinaryEncoder encoder, QualifiedName? name)
+        {
+            if (name == null)
+            {
+                encoder.WriteUInt16(0);
+                encoder.WriteString(null);
+                return;
+            }
+            encoder.WriteUInt16(name.NamespaceIndex);
+            encoder.WriteString(name.Name);
+        }
+
+        public static QualifiedName? Decode(BinaryDecoder decoder)
+        {
+            var nsIndex = decoder.ReadUInt16();
+            var name = decoder.ReadString();
+            return new QualifiedName(name ?? "", nsIndex);
+        }
+    }
+
+    public static class LocalizedTextCodec
+    {
+        public static void Encode(BinaryEncoder encoder, LocalizedText? text)
+        {
+            if (text == null)
+            {
+                encoder.WriteByte(0);
+                return;
+            }
+            byte encoding = 0;
+            if (text.Locale != null) encoding |= 0x01;
+            if (text.Text != null) encoding |= 0x02;
+            encoder.WriteByte(encoding);
+            if (text.Locale != null) encoder.WriteString(text.Locale);
+            if (text.Text != null) encoder.WriteString(text.Text);
+        }
+
+        public static LocalizedText? Decode(BinaryDecoder decoder)
+        {
+            var encoding = decoder.ReadByte();
+            var text = new LocalizedText();
+            if ((encoding & 0x01) != 0) text.Locale = decoder.ReadString();
+            if ((encoding & 0x02) != 0) text.Text = decoder.ReadString();
+            return text;
+        }
+    }
+}

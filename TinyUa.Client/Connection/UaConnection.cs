@@ -1,0 +1,371 @@
+using System;
+using System.Security.Cryptography;
+using System.Threading.Tasks;
+using TinyUa.Core.Logging;
+using TinyUa.Core.Binary;
+using TinyUa.Core.Security;
+using TinyUa.Core.Security.Certificates;
+using TinyUa.Core.Transport;
+using TinyUa.Core.Types;
+using TinyUa.Core.Client.Services;
+
+namespace TinyUa.Core.Client.Connection
+{
+
+    internal class UaConnection : IDisposable
+    {
+        private readonly int _timeout;
+        private readonly ILogger _logger;
+        private UaSocketClient? _socket;
+        private SecurityPolicy _securityPolicy;
+        private NodeId? _sessionId;
+        private NodeId? _authenticationToken;
+
+        private byte[]? _serverCertificate;
+        private byte[]? _serverNonce;
+
+        internal NodeId? SessionId => _sessionId;
+        internal NodeId? AuthenticationToken => _authenticationToken;
+        internal uint RevisedChannelLifetime => _socket?.RevisedChannelLifetime ?? 3600000;
+
+        internal bool IsAlive => _socket?.IsAlive ?? false;
+
+        internal event Action<Exception?>? ConnectionLost;
+
+        internal UaConnection(int timeout = 1000, ILogger? logger = null)
+        {
+            _timeout = timeout;
+            _securityPolicy = new NoneSecurityPolicy();
+            _logger = logger ?? NullLogger.Instance;
+        }
+
+        internal void SetDebugMode(bool enabled)
+        {
+            if (_socket != null) _socket.DebugMode = enabled;
+        }
+
+        internal void SetSecurityPolicy(SecurityPolicy policy)
+        {
+            _securityPolicy = policy ?? new NoneSecurityPolicy();
+            if (_socket != null)
+            {
+                _logger.LogDebug($"SecurityPolicy changed to {_securityPolicy.Uri} (existing socket will be recreated on next ConnectAsync)");
+            }
+        }
+
+        internal SecurityPolicy SecurityPolicy => _securityPolicy;
+
+        internal async Task ConnectAsync(string host, int port)
+        {
+            if (_socket != null)
+            {
+                _socket.ConnectionLost -= OnSocketConnectionLost;
+                _socket.Dispose();
+            }
+            _socket = new UaSocketClient(_timeout, _securityPolicy, _logger);
+            _socket.ConnectionLost += OnSocketConnectionLost;
+            await _socket.ConnectAsync(host, port).ConfigureAwait(false);
+        }
+
+        private void OnSocketConnectionLost(Exception? ex)
+        {
+            ConnectionLost?.Invoke(ex);
+        }
+
+        internal void Disconnect() => _socket?.Disconnect();
+
+        internal async Task DisconnectAsync()
+        {
+            if (_socket != null) await _socket.DisconnectAsync().ConfigureAwait(false);
+        }
+
+        internal async Task<Acknowledge> SendHelloAsync(string endpointUrl, uint maxMessageSize = 0)
+            => await _socket!.SendHelloAsync(endpointUrl, maxMessageSize).ConfigureAwait(false);
+
+        internal async Task<EndpointDescription[]?> GetEndpointsAsync(string endpointUrl)
+        {
+            var request = new GetEndpointsRequest
+            {
+                RequestHeader = new RequestHeader { AuthenticationToken = new NodeId() },
+                EndpointUrl = endpointUrl,
+                LocaleIds = null,
+                ProfileUris = null
+            };
+            var response = await _socket!.SendRequestAsync<GetEndpointsRequest, GetEndpointsResponse>(request).ConfigureAwait(false);
+            response.ResponseHeader.ServiceResult.Check();
+            return response.Endpoints;
+        }
+
+        internal async Task<OpenSecureChannelResult> OpenSecureChannelAsync(OpenSecureChannelParameters parameters)
+            => await _socket!.OpenSecureChannelAsync(parameters).ConfigureAwait(false);
+
+        internal async Task<OpenSecureChannelResult> RenewSecureChannelAsync()
+        {
+            var nonce = new byte[_securityPolicy.NonceLength];
+            if (nonce.Length > 0)
+                RandomNumberGenerator.Fill(nonce);
+
+            var parameters = new OpenSecureChannelParameters
+            {
+                RequestType = SecurityTokenRequestType.Renew,
+                SecurityMode = _securityPolicy.SecurityMode,
+                ClientNonce = nonce.Length > 0 ? nonce : null,
+                RequestedLifetime = 3600000
+            };
+            return await OpenSecureChannelAsync(parameters).ConfigureAwait(false);
+        }
+
+        internal async Task CloseSecureChannelAsync()
+        {
+            if (_socket == null) return;
+            try { await _socket.SendRequestNoWait(new CloseSecureChannelRequest(), null, MessageType.SecureClose).ConfigureAwait(false); }
+            catch (Exception ex) { _logger.LogDebug(ex, "CloseSecureChannel error (ignored)"); }
+        }
+
+        internal async Task CloseSessionAsync()
+        {
+            if (_sessionId == null || _authenticationToken == null) return;
+            try
+            {
+                var request = new CloseSessionRequest
+                {
+                    RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken },
+                    DeleteSubscriptions = true
+                };
+                var response = await _socket!.SendRequestAsync<CloseSessionRequest, CloseSessionResponse>(request).ConfigureAwait(false);
+                response.ResponseHeader.ServiceResult.Check();
+            }
+            catch (Exception ex) { _logger.LogDebug(ex, "CloseSession error (ignored)"); }
+            finally { _sessionId = null; _authenticationToken = null; }
+        }
+
+        internal async Task<CreateSessionResponse> CreateSessionAsync(string endpointUrl, string sessionName = "OpcUa Session",
+            string? applicationUri = null, string? productUri = null, uint requestedSessionTimeout = 3600000)
+        {
+            var clientNonce = new byte[_securityPolicy.NonceLength > 0 ? _securityPolicy.NonceLength : 32];
+            if (clientNonce.Length > 0)
+                RandomNumberGenerator.Fill(clientNonce);
+
+            var request = new CreateSessionRequest
+            {
+                Parameters = new CreateSessionParameters
+                {
+                    ClientDescription = new ApplicationDescription
+                    {
+                        ApplicationUri = applicationUri ?? "urn:openua:client",
+                        ProductUri = productUri ?? "urn:openua",
+                        ApplicationName = new LocalizedText(sessionName),
+                        ApplicationType = ApplicationType.Client
+                    },
+                    EndpointUrl = endpointUrl,
+                    SessionName = sessionName,
+                    ClientNonce = clientNonce,
+                    ClientCertificate = _securityPolicy.SenderCertificate,
+                    RequestedSessionTimeout = requestedSessionTimeout
+                }
+            };
+            var response = await _socket!.SendRequestAsync<CreateSessionRequest, CreateSessionResponse>(request).ConfigureAwait(false);
+            response.ResponseHeader.ServiceResult.Check();
+            _sessionId = response.SessionId;
+            _authenticationToken = response.AuthenticationToken;
+
+            _serverCertificate = response.ServerCertificate;
+            _serverNonce = response.ServerNonce;
+
+            return response;
+        }
+
+        internal async Task ActivateSessionAsync(UserIdentityToken? userIdentity = null)
+        {
+            var parameters = new ActivateSessionParameters { UserIdentity = userIdentity };
+            ComputeClientSignature(parameters);
+
+            var request = new ActivateSessionRequest
+            {
+                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
+                Parameters = parameters
+            };
+            var response = await _socket!.SendRequestAsync<ActivateSessionRequest, ActivateSessionResponse>(request).ConfigureAwait(false);
+            response.ResponseHeader.ServiceResult.Check();
+        }
+
+        internal async Task ActivateSessionAsync(NodeId sessionId, NodeId authenticationToken, UserIdentityToken? userIdentity = null)
+        {
+            _authenticationToken = authenticationToken;
+            _sessionId = sessionId;
+            var parameters = new ActivateSessionParameters { UserIdentity = userIdentity };
+            ComputeClientSignature(parameters);
+
+            var request = new ActivateSessionRequest
+            {
+                RequestHeader = new RequestHeader { AuthenticationToken = authenticationToken },
+                Parameters = parameters
+            };
+            var response = await _socket!.SendRequestAsync<ActivateSessionRequest, ActivateSessionResponse>(request).ConfigureAwait(false);
+            response.ResponseHeader.ServiceResult.Check();
+        }
+
+        private void ComputeClientSignature(ActivateSessionParameters parameters)
+        {
+            var asymCrypto = _securityPolicy.AsymmetricCryptography;
+            if (asymCrypto.SignatureSize == 0)
+                return;
+
+            if (_serverCertificate == null || _serverCertificate.Length == 0
+                || _serverNonce == null || _serverNonce.Length == 0)
+                return;
+
+            var signedData = new byte[_serverCertificate.Length + _serverNonce.Length];
+            Buffer.BlockCopy(_serverCertificate, 0, signedData, 0, _serverCertificate.Length);
+            Buffer.BlockCopy(_serverNonce, 0, signedData, _serverCertificate.Length, _serverNonce.Length);
+
+            var signature = asymCrypto.Sign(signedData);
+            parameters.ClientSignature.Algorithm = GetAsymmetricSignatureUri();
+            parameters.ClientSignature.Signature = signature;
+        }
+
+        private string GetAsymmetricSignatureUri()
+        {
+            var uri = _securityPolicy.Uri;
+            if (uri.EndsWith("#Aes256_Sha256_RsaPss"))
+                return "http://opcfoundation.org/UA/security/rsa-pss-sha2-256";
+            return "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
+        }
+
+        internal async Task<NotificationMessage> RepublishAsync(uint subscriptionId, uint sequenceNumber)
+        {
+            var request = new RepublishRequest
+            {
+                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
+                Parameters = new RepublishParameters { SubscriptionId = subscriptionId, RetransmitSequenceNumber = sequenceNumber }
+            };
+            var response = await _socket!.SendRequestAsync<RepublishRequest, RepublishResponse>(request).ConfigureAwait(false);
+            response.ResponseHeader.ServiceResult.Check();
+            return response.NotificationMessage;
+        }
+
+        internal async Task<BrowseResult[]?> BrowseAsync(NodeId nodeId, BrowseDirection direction = BrowseDirection.Forward, uint maxReferences = 100)
+        {
+            var request = new BrowseRequest
+            {
+                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
+                Parameters = new BrowseParameters
+                {
+                    RequestedMaxReferencesPerNode = maxReferences,
+                    NodesToBrowse = new[] { new BrowseDescription
+                    {
+                        NodeId = nodeId, BrowseDirection = direction, ReferenceTypeId = new NodeId(33, 0),
+                        IncludeSubtypes = true, NodeClassMask = 0, ResultMask = 63
+                    }}
+                }
+            };
+            var response = await SendRequestAsync<BrowseRequest, BrowseResponse>(request).ConfigureAwait(false);
+            response.ResponseHeader.ServiceResult.Check();
+            return response.Results;
+        }
+
+        internal async Task<BrowseResult[]?> BrowseNextAsync(byte[] continuationPoint)
+        {
+            var request = new BrowseNextRequest
+            {
+                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
+                ReleaseContinuationPoints = false,
+                ContinuationPoints = new[] { continuationPoint }
+            };
+            var response = await SendRequestAsync<BrowseNextRequest, BrowseNextResponse>(request).ConfigureAwait(false);
+            response.ResponseHeader.ServiceResult.Check();
+            return response.Results;
+        }
+
+        internal async Task<DataValue[]?> ReadAsync(NodeId nodeId, AttributeId attributeId = AttributeId.Value)
+        {
+            var request = new ReadRequest
+            {
+                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
+                Parameters = new ReadParameters
+                {
+                    MaxAge = 0, TimestampsToReturn = TimestampsToReturn.Both,
+                    NodesToRead = new[] { new ReadValueId { NodeId = nodeId, AttributeId = attributeId } }
+                }
+            };
+            var response = await _socket!.SendRequestAsync<ReadRequest, ReadResponse>(request).ConfigureAwait(false);
+            response.ResponseHeader.ServiceResult.Check();
+            return response.Results;
+        }
+
+        internal async Task<DataValue[]?> ReadAsync(NodeId[] nodeIds, AttributeId attributeId = AttributeId.Value)
+        {
+            var nodesToRead = new ReadValueId[nodeIds.Length];
+            for (int i = 0; i < nodeIds.Length; i++)
+                nodesToRead[i] = new ReadValueId { NodeId = nodeIds[i], AttributeId = attributeId };
+
+            var request = new ReadRequest
+            {
+                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
+                Parameters = new ReadParameters { MaxAge = 0, TimestampsToReturn = TimestampsToReturn.Both, NodesToRead = nodesToRead }
+            };
+            var response = await _socket!.SendRequestAsync<ReadRequest, ReadResponse>(request).ConfigureAwait(false);
+            response.ResponseHeader.ServiceResult.Check();
+            return response.Results;
+        }
+
+        internal async Task<StatusCode[]?> WriteAsync(NodeId nodeId, DataValue value)
+            => await WriteAsync(new[] { new WriteValue { NodeId = nodeId, Value = value } }).ConfigureAwait(false);
+
+        internal async Task<StatusCode[]?> WriteAsync(NodeId nodeId, object value, VariantType? variantType = null)
+            => await WriteAsync(nodeId, new DataValue(new Variant(value, variantType))).ConfigureAwait(false);
+
+        internal async Task<StatusCode[]?> WriteAsync(WriteValue[] nodesToWrite)
+        {
+            var request = new WriteRequest
+            {
+                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
+                Parameters = new WriteParameters { NodesToWrite = nodesToWrite }
+            };
+            var response = await _socket!.SendRequestAsync<WriteRequest, WriteResponse>(request).ConfigureAwait(false);
+            response.ResponseHeader.ServiceResult.Check();
+            return response.Results;
+        }
+
+        internal async Task<TResponse> SendRequestAsync<TRequest, TResponse>(TRequest request, byte[]? messageType = null)
+            where TRequest : IEncodable where TResponse : IDecodable<TResponse>, new()
+        {
+            var body = await _socket!.SendRequestAsync(request, messageType).ConfigureAwait(false);
+            var decoder = new BinaryDecoder(body);
+            return TResponse.Decode(decoder);
+        }
+
+        internal Task SendRequestNoWaitAsync<T>(T request, Action<byte[]>? callback = null) where T : IEncodable
+            => _socket!.SendRequestNoWait(request, callback);
+
+        internal byte[] PrepareEncodedReadRequest(NodeId[] nodeIds, AttributeId attributeId = AttributeId.Value)
+        {
+            var nodesToRead = new ReadValueId[nodeIds.Length];
+            for (int i = 0; i < nodeIds.Length; i++)
+                nodesToRead[i] = new ReadValueId { NodeId = nodeIds[i], AttributeId = attributeId };
+            var request = new ReadRequest
+            {
+                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
+                Parameters = new ReadParameters { MaxAge = 0, TimestampsToReturn = TimestampsToReturn.Both, NodesToRead = nodesToRead }
+            };
+            var enc = new BinaryEncoder(4096);
+            request.Encode(enc);
+            return enc.ToByteArray();
+        }
+
+        internal async Task<DataValue[]> ReadWithEncodedBodyAsync(byte[] encodedBody)
+        {
+            var body = await _socket!.SendEncodedBodyAsync(encodedBody).ConfigureAwait(false);
+            var decoder = new BinaryDecoder(body);
+            var response = ReadResponse.Decode(decoder);
+            response.ResponseHeader.ServiceResult.Check();
+            return response.Results!;
+        }
+
+        public void Dispose()
+        {
+            Disconnect();
+            _socket?.Dispose();
+        }
+    }
+}

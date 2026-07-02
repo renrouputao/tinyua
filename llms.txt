@@ -1,0 +1,83 @@
+# TinyUa
+
+> A lightweight, from-scratch OPC UA client stack for .NET 8. Core libraries have zero dependency on the OPC Foundation SDK.
+
+## Intro
+
+TinyUa implements the full OPC UA binary protocol from scratch — binary encoding, security policies (4 policies + 3 token types), transport layer with message chunking, and a high-level client with Fluent API. It targets .NET 8 and uses only `System.Security.Cryptography` for all cryptographic operations. The OPC Foundation SDK (`OPCFoundation.NetStandard.Opc.Ua`) is only used in test and example projects for reference comparisons.
+
+## Quick Start
+
+```bash
+dotnet build TinyUa.sln
+dotnet run --project TinyUa.Example -- selftest
+```
+
+Minimal code:
+```csharp
+var client = await UaClient.ConnectTo("opc.tcp://server:4840")
+    .WithSecurity("Basic256Sha256")
+    .WithUserName("user", "pass")
+    .BuildAndRunAsync();
+
+var value = await client.ReadAsync("ns=2;s=Temperature");
+Console.WriteLine(value);
+```
+
+## API
+
+**Fluent Builder:**
+- `UaClient.ConnectTo(url)` — start builder
+- `.WithSecurity("Basic256Sha256")` — set security policy (short name)
+- `.WithSecurityMode(MessageSecurityMode.SignAndEncrypt)`
+- `.WithUserName(user, pass)` — username/password authentication
+- `.WithAppName("MyApp")` — set application name
+- `.EnableLog(ILogger)` / `.EnableLogFile(path)` — logging
+- `.BuildAndRunAsync()` — connect and create session
+
+**Services:**
+- `ReadAsync(nodeId)` — read a single node value
+- `ReadAsync(nodeId[])` — **batch read** multiple nodes in one request (much faster for many variables)
+- `ReadValueAsync<T>(nodeId)` — typed single-node read (returns `T`)
+- `WriteAsync(nodeId, value)` — write a single node value
+- `WriteAsync(WriteValue[])` — **batch write** multiple values in one request (much faster for many variables)
+- `BrowseAsync(nodeId)` — browse children
+- `BrowseNextAsync(continuationPoint)` — continue browse
+- `CreateSubscriptionAsync(interval)` — create subscription, returns IDisposable
+
+**Configuration (`UaClientOptions`):**
+- `Security.Policy` — "None", "Basic256Sha256", "Aes128Sha256RsaOaep", "Aes256Sha256RsaPss"
+- `Security.Mode` — None, Sign, SignAndEncrypt
+- `Security.UserIdentity` — Anonymous, UserName, X509 certificate
+- `Security.Certificate.AutoDiscoverServerCertificate` — auto-discover server cert via GetEndpoints
+- `Security.Certificate.AutoAcceptServerCertificate` — auto-trust server cert
+- `ReconnectMaxRetries` / `ReconnectInitialDelayMs` / `ReconnectMaxDelayMs` — exponential backoff
+- `Timeout` — request timeout in ms
+- `ErrorMode` — Throw or ReturnNull on error
+
+## Security
+
+| Policy | Key Exchange | Symmetric Crypto | Asymmetric Crypto |
+|--------|-------------|------------------|-------------------|
+| None | — | — | — |
+| Basic256Sha256 | RSA-OAEP-SHA256 | AES-256-CBC + HMAC-SHA256 | RSA-SHA256 |
+| Aes128Sha256RsaOaep | RSA-OAEP-SHA256 | AES-128-CBC + HMAC-SHA256 | RSA-SHA256 |
+| Aes256Sha256RsaPss | RSA-OAEP-SHA256 (PSS) | AES-256-CBC + HMAC-SHA256 | RSA-PSS-SHA256 |
+
+Token types: Anonymous, UserName, X509 Certificate
+
+## Project Structure
+
+| Project | Description |
+|---------|-------------|
+| TinyUa.Core | Binary encoding, OPC UA types, security policies, logging |
+| TinyUa.Transport | Message chunking (OPN/MSG), secure channel, key derivation |
+| TinyUa.Client | Fluent API, connection management, services, subscriptions |
+| TinyUa.Example | Console self-test app with in-process server |
+| TinyUa.Explorer | WPF GUI browser with security endpoint discovery |
+| TinyUa.Benchmarks | Performance and crypto primitive benchmarks |
+| TinyUa.Client.Tests | xUnit client tests |
+| TinyUa.Security.Tests | xUnit security integration tests |
+
+## Docs
+- [Contributing Guide](CONTRIBUTING.md)
