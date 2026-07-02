@@ -301,10 +301,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
             {
                 try
                 {
-                    var results = await _client.ReadAsync(node.NodeId, attrId);
-                    if (results != null && results.Length > 0)
+                    var dv = await _client.ReadAsync(node.NodeId, attrId);
+                    if (dv != null)
                     {
-                        var dv = results[0];
                         Attributes.Add(new AttributeRow
                         {
                             Attribute = label,
@@ -333,10 +332,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
         try
         {
-            var results = await _client.ReadAsync(SelectedNode.NodeId, AttributeId.Value);
-            if (results != null && results.Length > 0)
+            var dv = await _client.ReadAsync(SelectedNode.NodeId, AttributeId.Value);
+            if (dv != null)
             {
-                var dv = results[0];
                 WriteValue = dv.Value?.Value?.ToString() ?? "";
                 StatusText = $"Read: {WriteValue} [{dv.StatusCode}]";
             }
@@ -392,8 +390,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
     {
         try
         {
-            var results = await _client!.ReadAsync(nodeId, AttributeId.DataType);
-            if (results == null || results.Length == 0 || results[0].Value?.Value is not NodeId dtNodeId)
+            var dv = await _client!.ReadAsync(nodeId, AttributeId.DataType);
+            if (dv?.Value?.Value is not NodeId dtNodeId)
                 return VariantType.String;
 
             if (dtNodeId.NamespaceIndex != 0)

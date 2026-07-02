@@ -1,0 +1,17 @@
+<Project>
+  <PropertyGroup>
+    <!-- Shared NuGet metadata for all core packages -->
+    <Authors>sam_wlp</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/renrouputao/tinyua</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/renrouputao/tinyua.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>opcua;opc-ua;iiot;industrial-automation</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <Version>1.0.0-preview2</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>

@@ -676,10 +676,11 @@ namespace TinyUa.Core.Client
             }
         }
 
-        public async Task<DataValue[]?> ReadAsync(NodeId nodeId, AttributeId attributeId = AttributeId.Value, CancellationToken cancellationToken = default)
+        public async Task<DataValue?> ReadAsync(NodeId nodeId, AttributeId attributeId = AttributeId.Value, CancellationToken cancellationToken = default)
         {
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
-            return await ExecuteWithRetryAsync("Read", () => _client!.ReadAsync(nodeId, attributeId), cancellationToken).ConfigureAwait(false);
+            var results = await ExecuteWithRetryAsync("Read", () => _client!.ReadAsync(nodeId, attributeId), cancellationToken).ConfigureAwait(false);
+            return results != null && results.Length > 0 ? results[0] : null;
         }
 
         public async Task<DataValue[]?> ReadAsync(NodeId[] nodeIds, AttributeId attributeId = AttributeId.Value, CancellationToken cancellationToken = default)
@@ -703,11 +704,11 @@ namespace TinyUa.Core.Client
             return ExtractValue<T>(results);
         }
 
-        private static T? ExtractValue<T>(DataValue[]? results)
+        private static T? ExtractValue<T>(DataValue? result)
         {
-            if (results != null && results.Length > 0 && results[0].Value?.Value != null)
+            if (result?.Value?.Value != null)
             {
-                try { return (T?)results[0].Value.Value; }
+                try { return (T?)result.Value.Value; }
                 catch (InvalidCastException) { return default; }
             }
             return default;
@@ -721,10 +722,11 @@ namespace TinyUa.Core.Client
             return await ReadValueAsync<T>(nodeId, cancellationToken).ConfigureAwait(false);
         }
 
-        public async Task<StatusCode[]?> WriteAsync(NodeId nodeId, object value, CancellationToken cancellationToken = default)
+        public async Task<StatusCode?> WriteAsync(NodeId nodeId, object value, CancellationToken cancellationToken = default)
         {
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
-            return await ExecuteWithRetryAsync("Write", () => _client!.WriteAsync(nodeId, value), cancellationToken).ConfigureAwait(false);
+            var results = await ExecuteWithRetryAsync("Write", () => _client!.WriteAsync(nodeId, value), cancellationToken).ConfigureAwait(false);
+            return results != null && results.Length > 0 ? results[0] : null;
         }
 
         public async Task<StatusCode[]?> WriteAsync(WriteValue[] values, CancellationToken cancellationToken = default)
@@ -734,7 +736,7 @@ namespace TinyUa.Core.Client
             return await ExecuteWithRetryAsync("Write", () => _client!.WriteAsync(values), cancellationToken).ConfigureAwait(false);
         }
 
-        public Task WriteAsync(string nodeIdString, object value, CancellationToken cancellationToken = default)
+        public Task<StatusCode?> WriteAsync(string nodeIdString, object value, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrEmpty(nodeIdString))
                 throw new ArgumentException("NodeId string cannot be null or empty", nameof(nodeIdString));

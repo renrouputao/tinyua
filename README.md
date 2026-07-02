@@ -89,35 +89,61 @@ This starts an in-process OPC UA server and runs the client against it — no ex
 
 ```csharp
 using TinyUa.Core.Client;
-using TinyUa.Core.Security;
 
-// Connect with security
-var client = await UaClient.ConnectTo("opc.tcp://myserver:4840")
-    .WithSecurity("Basic256Sha256")
-    .WithUserName("user", "password")
+// No security (anonymous, no encryption)
+await using var client = await UaClient
+    .ConnectTo("opc.tcp://myserver:4840")
+    .WithAppName("MyApp")
     .BuildAndRunAsync();
 
-// Read a value
-var result = await client.ReadAsync("ns=2;s=Temperature");
-Console.WriteLine($"Temperature: {result.Value}");
-
-// Browse children
-var children = await client.BrowseAsync("ns=2;s=Devices");
-foreach (var child in children)
-    Console.WriteLine($"  {child.DisplayName}: {child.NodeId}");
-
-// Create a subscription (auto-managed publishing)
-var sub = await client.CreateSubscriptionAsync(1000); // 1s interval
-// ... monitored items are delivered via callback
-
-await client.DisposeAsync();
+// Read a single value
+var time = await client.ReadValueAsync<DateTime>("i=2258");
+Console.WriteLine($"ServerTime: {time:HH:mm:ss.fff}");
 ```
 
-### Connect without security
+```csharp
+// Encrypted channel + anonymous (no user credentials)
+await using var client = await UaClient
+    .ConnectTo("opc.tcp://myserver:4840")
+    .WithAppName("MyApp")
+    .WithSecurity("Basic256Sha256")
+    .BuildAndRunAsync();
+
+// Browse the Objects folder
+var nodes = await client.BrowseAsync("i=85");
+Console.WriteLine($"  Objects folder: {nodes?.Length ?? 0} children");
+
+// Read Server.ServerStatus.CurrentTime
+var time = await client.ReadValueAsync<DateTime>("i=2258");
+Console.WriteLine($"  ServerTime: {time:HH:mm:ss.fff}");
+```
 
 ```csharp
-var client = await UaClient.ConnectTo("opc.tcp://myserver:4840")
+using TinyUa.Core.Client;
+using TinyUa.Core.Types;
+
+// Encrypted channel + username/password authentication
+await using var client = await UaClient
+    .ConnectTo("opc.tcp://myserver:4840")
+    .WithAppName("MyApp")
+    .WithSecurity("Aes128_Sha256_RsaOaep")
+    .WithUserName("test", "user123")
     .BuildAndRunAsync();
+
+// Read multiple nodes at once
+var results = await client.ReadAsync(new NodeId[] { "i=2256", "i=2258" });
+if (results != null)
+    for (int i = 0; i < results.Length; i++)
+        Console.WriteLine($"  [{i}] = {results[i].Value?.Value ?? "(null)"}");
+
+// Subscribe to a value change with a typed callback
+var sub = await client.SubscribeAsync<DateTime>("i=2258", val =>
+{
+    Console.WriteLine($"Tick: {val:HH:mm:ss.fff}");
+}, interval: 500);
+
+await Task.Delay(3000);
+sub.Dispose();
 ```
 
 ## Project Structure
@@ -151,6 +177,9 @@ The OPC Foundation SDK (`OPCFoundation.NetStandard.Opc.Ua`) is used **only in te
 ## Configuration
 
 ```csharp
+using TinyUa.Core.Client;
+using TinyUa.Core.Security;
+
 var options = new UaClientOptions
 {
     ApplicationName = "MyApp",
@@ -161,18 +190,21 @@ var options = new UaClientOptions
 
     Security = new SecurityOptions
     {
-        Policy = "Basic256Sha256",          // None, Basic256Sha256, Aes128Sha256RsaOaep, Aes256Sha256RsaPss
+        Policy = "Basic256Sha256",                  // None, Basic256Sha256, Aes128Sha256RsaOaep, Aes256Sha256RsaPss
         Mode = MessageSecurityMode.SignAndEncrypt,  // None, Sign, SignAndEncrypt
+        AutoDiscoverServerCertificate = true,       // auto-discover via GetEndpoints
+        AutoAcceptServerCertificate = true,         // auto-trust (disable in production for custom validation)
         UserIdentity = new UserIdentityOptions
         {
             Type = UserTokenType.UserName,
-            UserName = "user",
+            Username = "user",
             Password = "pass"
         },
         Certificate = new CertificateOptions
         {
-            AutoDiscoverServerCertificate = true,   // auto-discover via GetEndpoints
-            AutoAcceptServerCertificate = true      // auto-trust (disable in production for custom validation)
+            AutoGenerate = true,
+            KeySize = 2048,
+            ValidityYears = 5
         }
     },
 
@@ -187,14 +219,23 @@ var options = new UaClientOptions
 ## Logging
 
 ```csharp
-// Console logging
+using TinyUa.Core.Client;
+using TinyUa.Core.Logging;
+
+// Console logging via delegate
 var client = await UaClient.ConnectTo("opc.tcp://server:4840")
-    .EnableLog(new DelegateLogger((level, msg) => Console.WriteLine($"[{level}] {msg}")))
+    .EnableLog((level, ex, msg) => Console.WriteLine($"[{level}] {msg}"))
     .BuildAndRunAsync();
 
-// File logging
+// Custom ILogger implementation
 var client = await UaClient.ConnectTo("opc.tcp://server:4840")
-    .EnableLogFile("tinyua.log", LogLevel.Debug, async: true)
+    .WithLogger(new DelegateLogger((level, ex, msg) =>
+        Console.WriteLine($"[{level}] {msg}"), LogLevel.Debug))
+    .BuildAndRunAsync();
+
+// File logging (directory path, auto-creates log files)
+var client = await UaClient.ConnectTo("opc.tcp://server:4840")
+    .EnableLogFile("./logs", LogLevel.Debug, async: true)
     .BuildAndRunAsync();
 ```
 
