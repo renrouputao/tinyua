@@ -8,6 +8,8 @@
     <AssemblyName>TinyUa.Transport</AssemblyName>
     <Description>OPC UA Transport Layer - Message Chunking and Secure Connection</Description>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

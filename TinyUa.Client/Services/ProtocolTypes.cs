@@ -5,16 +5,36 @@ using TinyUa.Core.Types;
 
 namespace TinyUa.Core.Client.Services
 {
+    /// <summary>
+    /// Represents the OPC UA service request header that is included in every service request.
+    /// </summary>
     public class RequestHeader : IEncodable
     {
+        /// <summary>Gets or sets the authentication token (session authentication token node id).</summary>
         public NodeId AuthenticationToken { get; set; } = new NodeId();
+
+        /// <summary>Gets or sets the timestamp of the request.</summary>
         public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+
+        /// <summary>Gets or sets the client-assigned request handle used to correlate responses.</summary>
         public uint RequestHandle { get; set; }
+
+        /// <summary>Gets or sets the diagnostics flags indicating what diagnostic information to return.</summary>
         public uint ReturnDiagnostics { get; set; }
+
+        /// <summary>Gets or sets the audit entry identifier for auditing purposes.</summary>
         public string? AuditEntryId { get; set; }
+
+        /// <summary>Gets or sets the timeout hint in milliseconds. 0 means no timeout hint.</summary>
         public uint TimeoutHint { get; set; } = 0;
+
+        /// <summary>Gets or sets an optional additional header as an extension object.</summary>
         public ExtensionObject? AdditionalHeader { get; set; }
 
+        /// <summary>
+        /// Encodes this request header into the given <paramref name="encoder"/>.
+        /// </summary>
+        /// <param name="encoder">The <see cref="BinaryEncoder"/> to write to.</param>
         public void Encode(BinaryEncoder encoder)
         {
             NodeIdCodec.Encode(encoder, AuthenticationToken);
@@ -35,15 +55,34 @@ namespace TinyUa.Core.Client.Services
         }
     }
 
+    /// <summary>
+    /// Represents the OPC UA service response header that is included in every service response.
+    /// </summary>
     public class ResponseHeader : IDecodable<ResponseHeader>
     {
+        /// <summary>Gets or sets the timestamp of the response.</summary>
         public DateTime Timestamp { get; set; }
+
+        /// <summary>Gets or sets the request handle echoed from the corresponding request.</summary>
         public uint RequestHandle { get; set; }
+
+        /// <summary>Gets or sets the overall service result status code.</summary>
         public StatusCode ServiceResult { get; set; } = new StatusCode();
+
+        /// <summary>Gets or sets optional diagnostic information associated with the service result.</summary>
         public DiagnosticInfo? ServiceDiagnostics { get; set; }
+
+        /// <summary>Gets or sets a string table used for compact encoding of diagnostic strings.</summary>
         public string[]? StringTable { get; set; }
+
+        /// <summary>Gets or sets an optional additional header as an extension object.</summary>
         public ExtensionObject? AdditionalHeader { get; set; }
 
+        /// <summary>
+        /// Decodes a <see cref="ResponseHeader"/> from the given <paramref name="decoder"/>.
+        /// </summary>
+        /// <param name="decoder">The <see cref="BinaryDecoder"/> to read from.</param>
+        /// <returns>The decoded <see cref="ResponseHeader"/>.</returns>
         public static ResponseHeader Decode(BinaryDecoder decoder)
         {
             var header = new ResponseHeader
@@ -94,15 +133,29 @@ namespace TinyUa.Core.Client.Services
         }
     }
 
+    /// <summary>
+    /// Represents OPC UA diagnostic information associated with a service result.
+    /// Currently empty placeholder for future use.
+    /// </summary>
     public class DiagnosticInfo
     {
     }
 
+    /// <summary>
+    /// Represents the OpenSecureChannel service request used to establish or renew a secure channel.
+    /// </summary>
     public class OpenSecureChannelRequest : IEncodable
     {
+        /// <summary>Gets or sets the service request header.</summary>
         public RequestHeader RequestHeader { get; set; } = new RequestHeader();
+
+        /// <summary>Gets or sets the OpenSecureChannel parameters.</summary>
         public OpenSecureChannelParameters Parameters { get; set; } = new OpenSecureChannelParameters();
 
+        /// <summary>
+        /// Encodes this request into the given <paramref name="encoder"/>.
+        /// </summary>
+        /// <param name="encoder">The <see cref="BinaryEncoder"/> to write to.</param>
         public void Encode(BinaryEncoder encoder)
         {
             NodeIdCodec.Encode(encoder, new NodeId(446, 0));
@@ -114,6 +167,9 @@ namespace TinyUa.Core.Client.Services
             encoder.WriteUInt32(Parameters.RequestedLifetime);
         }
 
+        /// <summary>
+        /// Prints debug information about this request to the console.
+        /// </summary>
         public void DebugPrint()
         {
             Console.WriteLine("[DEBUG] OpenSecureChannelRequest:");
@@ -132,11 +188,22 @@ namespace TinyUa.Core.Client.Services
         }
     }
 
+    /// <summary>
+    /// Represents the OpenSecureChannel service response returned by the server.
+    /// </summary>
     public class OpenSecureChannelResponse : IDecodable<OpenSecureChannelResponse>
     {
+        /// <summary>Gets or sets the service response header.</summary>
         public ResponseHeader ResponseHeader { get; set; } = null!;
+
+        /// <summary>Gets or sets the OpenSecureChannel result containing the security token.</summary>
         public OpenSecureChannelResult Parameters { get; set; } = null!;
 
+        /// <summary>
+        /// Decodes an <see cref="OpenSecureChannelResponse"/> from the given <paramref name="decoder"/>.
+        /// </summary>
+        /// <param name="decoder">The <see cref="BinaryDecoder"/> to read from.</param>
+        /// <returns>The decoded <see cref="OpenSecureChannelResponse"/>.</returns>
         public static OpenSecureChannelResponse Decode(BinaryDecoder decoder)
         {
             decoder.CheckServiceFault();

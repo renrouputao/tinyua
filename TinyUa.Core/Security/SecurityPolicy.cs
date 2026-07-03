@@ -2,11 +2,18 @@ using System;
 
 namespace TinyUa.Core.Security
 {
+    /// <summary>
+    /// Specifies the OPC UA message security mode for a secure channel.
+    /// </summary>
     public enum MessageSecurityMode
     {
+        /// <summary>An invalid or unspecified security mode.</summary>
         Invalid = 0,
+        /// <summary>Messages are sent without any cryptographic protection.</summary>
         None = 1,
+        /// <summary>Messages are signed but not encrypted.</summary>
         Sign = 2,
+        /// <summary>Messages are signed and encrypted.</summary>
         SignAndEncrypt = 3
     }
 

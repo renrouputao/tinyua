@@ -10,8 +10,23 @@ using TinyUa.Core.Transport;
 
 namespace TinyUa.Core.Client.Discovery
 {
+    /// <summary>
+    /// Provides a fast, connection-oriented mechanism to discover available OPC UA endpoints
+    /// from a server by opening a short-lived connection and calling the GetEndpoints service.
+    /// </summary>
     public static class EndpointDiscoverer
     {
+        /// <summary>
+        /// Connects to the specified OPC UA server, retrieves its endpoints, and returns
+        /// a deduplicated, relevance-sorted list of <see cref="DiscoveredEndpoint"/> instances.
+        /// Secure endpoints are sorted before non-secure ones; within each group endpoints
+        /// are ordered by descending security level.
+        /// </summary>
+        /// <param name="endpointUrl">The discovery URL of the server (e.g. "opc.tcp://host:4840").</param>
+        /// <param name="timeoutMs">Connection and request timeout in milliseconds. Defaults to 10000.</param>
+        /// <param name="cancellationToken">A token to cancel the operation.</param>
+        /// <returns>A deduplicated, sorted list of discovered endpoints.</returns>
+        /// <exception cref="ArgumentException">Thrown when <paramref name="endpointUrl"/> is null or whitespace.</exception>
         public static async Task<IReadOnlyList<DiscoveredEndpoint>> DiscoverAsync(
             string endpointUrl, int timeoutMs = 10000, CancellationToken cancellationToken = default)
         {

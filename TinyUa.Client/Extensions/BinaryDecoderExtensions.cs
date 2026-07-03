@@ -5,10 +5,21 @@ using TinyUa.Core.Client.Services;
 
 namespace TinyUa.Core.Client
 {
+    /// <summary>
+    /// Provides convenience extension methods for the <see cref="BinaryDecoder"/> class.
+    /// </summary>
     public static class BinaryDecoderExtensions
     {
         private const uint ServiceFaultTypeId = 397;
 
+        /// <summary>
+        /// Reads and returns the numeric value of a type ID from the decoder, skipping over the encoding byte and any intermediate fields.
+        /// </summary>
+        /// <param name="decoder">The <see cref="BinaryDecoder"/> to read from.</param>
+        /// <returns>
+        /// The numeric type ID value if the encoded type is <see cref="NodeIdType.TwoByte"/>,
+        /// <see cref="NodeIdType.FourByte"/>, or <see cref="NodeIdType.Numeric"/>; otherwise, <c>0</c>.
+        /// </returns>
         public static uint ReadTypeIdValue(this BinaryDecoder decoder)
         {
             var encodingByte = decoder.ReadByte();
@@ -42,6 +53,11 @@ namespace TinyUa.Core.Client
 
         }
 
+        /// <summary>
+        /// Reads a type ID from the decoder and, if it corresponds to a service fault, decodes the response header and throws a <see cref="UaException"/>.
+        /// </summary>
+        /// <param name="decoder">The <see cref="BinaryDecoder"/> to read from.</param>
+        /// <exception cref="UaException">Thrown when the decoded type ID represents a service fault.</exception>
         public static void CheckServiceFault(this BinaryDecoder decoder)
         {
             var typeIdValue = decoder.ReadTypeIdValue();
@@ -53,6 +69,10 @@ namespace TinyUa.Core.Client
             }
         }
 
+        /// <summary>
+        /// Skips over diagnostic info entries from the decoder according to their encoding masks.
+        /// </summary>
+        /// <param name="decoder">The <see cref="BinaryDecoder"/> to read from.</param>
         public static void SkipDiagnosticInfos(this BinaryDecoder decoder)
         {
             if (decoder.Remaining < 4)

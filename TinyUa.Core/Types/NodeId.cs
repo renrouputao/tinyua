@@ -3,26 +3,60 @@ using TinyUa.Core.Binary;
 
 namespace TinyUa.Core.Types
 {
+    /// <summary>
+    /// Defines the encoding format for an OPC UA NodeId.
+    /// </summary>
     public enum NodeIdType : byte
     {
+        /// <summary>Two-byte numeric identifier with namespace index 0.</summary>
         TwoByte = 0,
+        /// <summary>Four-byte numeric identifier with a single-byte namespace index.</summary>
         FourByte = 1,
+        /// <summary>Full 32-bit numeric identifier with a 16-bit namespace index.</summary>
         Numeric = 2,
+        /// <summary>String-based identifier.</summary>
         String = 3,
+        /// <summary>GUID-based identifier.</summary>
         Guid = 4,
+        /// <summary>Opaque byte-string identifier.</summary>
         ByteString = 5
     }
 
+    /// <summary>
+    /// Represents an OPC UA NodeId, a qualified identifier for a node in the address space.
+    /// Supports numeric, string, GUID, byte-string, and compact two-byte / four-byte representations.
+    /// </summary>
     public class NodeId : IEquatable<NodeId?>, IComparable<NodeId?>
     {
+        /// <summary>
+        /// Gets the encoding format of this NodeId.
+        /// </summary>
         public NodeIdType NodeIdType { get; private set; }
+
+        /// <summary>
+        /// Gets the namespace index for this NodeId.
+        /// </summary>
         public ushort NamespaceIndex { get; private set; }
+
+        /// <summary>
+        /// Gets the identifier value. The runtime type depends on <see cref="NodeIdType"/>.
+        /// </summary>
         public object? Identifier { get; private set; }
 
+        /// <summary>
+        /// Gets or sets the resolved namespace URI. Can be set externally via namespace table lookup.
+        /// </summary>
         public string? NamespaceUri { get; internal set; }
 
+        /// <summary>
+        /// Gets or sets the server index, used in expanded NodeIds to reference a remote server.
+        /// </summary>
         public uint ServerIndex { get; internal set; }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="NodeId"/> class as a null / zero-value NodeId
+        /// (TwoByte encoding, identifier 0, namespace index 0).
+        /// </summary>
         public NodeId()
         {
             NodeIdType = NodeIdType.TwoByte;
@@ -32,6 +66,12 @@ namespace TinyUa.Core.Types
             ServerIndex = 0;
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="NodeId"/> class with a numeric identifier.
+        /// Automatically chooses TwoByte, FourByte, or Numeric encoding based on value ranges.
+        /// </summary>
+        /// <param name="identifier">The numeric identifier.</param>
+        /// <param name="namespaceIndex">The namespace index (default 0).</param>
         public NodeId(uint identifier, ushort namespaceIndex = 0)
         {
             if (namespaceIndex == 0 && identifier <= byte.MaxValue)
@@ -56,6 +96,12 @@ namespace TinyUa.Core.Types
             ServerIndex = 0;
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="NodeId"/> class with a string identifier.
+        /// </summary>
+        /// <param name="identifier">The string identifier. Must not be null.</param>
+        /// <param name="namespaceIndex">The namespace index (default 0).</param>
+        /// <exception cref="ArgumentNullException">Thrown when <paramref name="identifier"/> is null.</exception>
         public NodeId(string identifier, ushort namespaceIndex = 0)
         {
             NodeIdType = NodeIdType.String;
@@ -65,6 +111,11 @@ namespace TinyUa.Core.Types
             ServerIndex = 0;
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="NodeId"/> class with a GUID identifier.
+        /// </summary>
+        /// <param name="identifier">The GUID identifier.</param>
+        /// <param name="namespaceIndex">The namespace index (default 0).</param>
         public NodeId(Guid identifier, ushort namespaceIndex = 0)
         {
             NodeIdType = NodeIdType.Guid;
@@ -74,6 +125,12 @@ namespace TinyUa.Core.Types
             ServerIndex = 0;
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="NodeId"/> class with a byte-string identifier.
+        /// </summary>
+        /// <param name="identifier">The byte-string identifier. Must not be null.</param>
+        /// <param name="namespaceIndex">The namespace index (default 0).</param>
+        /// <exception cref="ArgumentNullException">Thrown when <paramref name="identifier"/> is null.</exception>
         public NodeId(byte[] identifier, ushort namespaceIndex = 0)
         {
             NodeIdType = NodeIdType.ByteString;
@@ -83,6 +140,12 @@ namespace TinyUa.Core.Types
             ServerIndex = 0;
         }
 
+        /// <summary>
+        /// Parses a NodeId from its string representation (e.g. "ns=2;s=MyVariable" or "i=2258").
+        /// </summary>
+        /// <param name="value">The string to parse. If null or empty, returns a null NodeId.</param>
+        /// <returns>A new <see cref="NodeId"/> parsed from the string.</returns>
+        /// <exception cref="FormatException">Thrown when the string format is invalid.</exception>
         public static NodeId Parse(string value)
         {
             if (string.IsNullOrEmpty(value))
@@ -142,6 +205,11 @@ namespace TinyUa.Core.Types
             };
         }
 
+        /// <summary>
+        /// Gets the numeric identifier value. Only valid for TwoByte, FourByte, and Numeric NodeIds.
+        /// </summary>
+        /// <returns>The numeric identifier as a <see cref="uint"/>.</returns>
+        /// <exception cref="InvalidOperationException">Thrown when the NodeId is not a numeric type.</exception>
         public uint GetNumericId()
         {
             return NodeIdType switch
@@ -153,6 +221,10 @@ namespace TinyUa.Core.Types
             };
         }
 
+        /// <summary>
+        /// Determines whether this NodeId represents a null / zero-value identifier.
+        /// </summary>
+        /// <returns><c>true</c> if the NodeId is null (zero; empty; etc.) in the context of its type; otherwise <c>false</c>.</returns>
         public bool IsNull()
         {
             if (NamespaceIndex != 0)
@@ -170,6 +242,10 @@ namespace TinyUa.Core.Types
             };
         }
 
+        /// <summary>
+        /// Returns the canonical string representation of this NodeId (e.g. "ns=2;i=2258").
+        /// </summary>
+        /// <returns>A string representing the NodeId.</returns>
         public override string ToString()
         {
             var parts = new System.Collections.Generic.List<string>();
@@ -198,6 +274,11 @@ namespace TinyUa.Core.Types
             return string.Join(";", parts);
         }
 
+        /// <summary>
+        /// Determines whether the current <see cref="NodeId"/> is equal to another <see cref="NodeId"/>.
+        /// </summary>
+        /// <param name="other">The other NodeId to compare with, or null.</param>
+        /// <returns><c>true</c> if the namespace index, type, and identifier are all equal; otherwise <c>false</c>.</returns>
         public bool Equals(NodeId? other)
         {
             if (other is null)
@@ -208,16 +289,30 @@ namespace TinyUa.Core.Types
                    Equals(Identifier, other.Identifier);
         }
 
+        /// <summary>
+        /// Determines whether the current <see cref="NodeId"/> is equal to another object.
+        /// </summary>
+        /// <param name="obj">The object to compare with.</param>
+        /// <returns><c>true</c> if <paramref name="obj"/> is a <see cref="NodeId"/> and equal to this instance; otherwise <c>false</c>.</returns>
         public override bool Equals(object? obj)
         {
             return Equals(obj as NodeId);
         }
 
+        /// <summary>
+        /// Returns a hash code for this NodeId.
+        /// </summary>
+        /// <returns>A hash code combining the namespace index, type, and identifier.</returns>
         public override int GetHashCode()
         {
             return HashCode.Combine(NamespaceIndex, NodeIdType, Identifier);
         }
 
+        /// <summary>
+        /// Compares the current NodeId with another NodeId.
+        /// </summary>
+        /// <param name="other">The other NodeId to compare with, or null.</param>
+        /// <returns>A value indicating the relative sort order.</returns>
         public int CompareTo(NodeId? other)
         {
             if (other is null)
@@ -247,6 +342,12 @@ namespace TinyUa.Core.Types
             ServerIndex = other.ServerIndex;
         }
 
+        /// <summary>
+        /// Determines whether two <see cref="NodeId"/> instances are equal.
+        /// </summary>
+        /// <param name="left">The first NodeId to compare.</param>
+        /// <param name="right">The second NodeId to compare.</param>
+        /// <returns><c>true</c> if both are null or both are equal; otherwise <c>false</c>.</returns>
         public static bool operator ==(NodeId? left, NodeId? right)
         {
             if (left is null)
@@ -254,24 +355,48 @@ namespace TinyUa.Core.Types
             return left.Equals(right);
         }
 
+        /// <summary>
+        /// Determines whether two <see cref="NodeId"/> instances are not equal.
+        /// </summary>
+        /// <param name="left">The first NodeId to compare.</param>
+        /// <param name="right">The second NodeId to compare.</param>
+        /// <returns><c>true</c> if the NodeIds are not equal; otherwise <c>false</c>.</returns>
         public static bool operator !=(NodeId? left, NodeId? right)
         {
             return !(left == right);
         }
 
+        /// <summary>
+        /// Converts a NodeId string representation to a <see cref="NodeId"/> instance.
+        /// </summary>
+        /// <param name="nodeIdString">A string in canonical NodeId format (e.g. "i=2258").</param>
         public static implicit operator NodeId(string nodeIdString)
             => Parse(nodeIdString);
 
+        /// <summary>
+        /// Converts a <see cref="uint"/> to a <see cref="NodeId"/> with namespace index 0.
+        /// The appropriate encoding (TwoByte, FourByte, or Numeric) is chosen automatically.
+        /// </summary>
+        /// <param name="numericId">The numeric identifier.</param>
         public static implicit operator NodeId(uint numericId)
             => new NodeId(numericId, 0);
     }
 
+    /// <summary>
+    /// Represents an OPC UA ExpandedNodeId, which extends <see cref="NodeId"/> with server index
+    /// and optional namespace URI for absolute addressing across servers.
+    /// </summary>
     public class ExpandedNodeId : NodeId
     {
+        /// <inheritdoc/>
         public ExpandedNodeId() : base() { }
+        /// <inheritdoc/>
         public ExpandedNodeId(uint identifier, ushort namespaceIndex = 0) : base(identifier, namespaceIndex) { }
+        /// <inheritdoc/>
         public ExpandedNodeId(string identifier, ushort namespaceIndex = 0) : base(identifier, namespaceIndex) { }
+        /// <inheritdoc/>
         public ExpandedNodeId(Guid identifier, ushort namespaceIndex = 0) : base(identifier, namespaceIndex) { }
+        /// <inheritdoc/>
         public ExpandedNodeId(byte[] identifier, ushort namespaceIndex = 0) : base(identifier, namespaceIndex) { }
     }
 }

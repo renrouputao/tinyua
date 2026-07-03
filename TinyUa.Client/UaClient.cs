@@ -15,15 +15,26 @@ using TinyUa.Core.Security.Certificates;
 
 namespace TinyUa.Core.Client
 {
+    /// <summary>Client connection state.</summary>
     public enum ClientState
     {
+        /// <summary>Not connected (initial state, or after disconnect).</summary>
         Disconnected,
+        /// <summary>Connection in progress.</summary>
         Connecting,
+        /// <summary>Connected and ready for read/write operations.</summary>
         Connected,
+        /// <summary>Disconnection in progress.</summary>
         Disconnecting,
+        /// <summary>Connection lost, automatic reconnection in progress.</summary>
         Reconnecting
     }
 
+    /// <summary>
+    /// TinyUa OPC UA client.
+    /// All operations (Read/Write/Browse/Subscribe) include automatic reconnect and timeout handling.
+    /// Implements <see cref="IAsyncDisposable"/> — use <c>await using var client = ...</c> for proper cleanup.
+    /// </summary>
     public class UaClient : IAsyncDisposable
     {
         private readonly UaConnection _client;
@@ -43,10 +54,19 @@ namespace TinyUa.Core.Client
 
         private TaskCompletionSource<bool>? _stopInProgress;
 
+        /// <summary>Whether the client is currently connected and the underlying channel is alive.</summary>
         public bool IsConnected => _state == ClientState.Connected && _client.IsAlive;
+
+        /// <summary>The session ID assigned by the server after a successful connection.</summary>
         public NodeId? SessionId => _client?.SessionId;
+
+        /// <summary>The configuration copy used at creation time (runtime changes have no effect).</summary>
         public UaClientOptions Options => _options;
+
+        /// <summary>The actual channel lifetime negotiated with the server (milliseconds).</summary>
         public uint RevisedChannelLifetime => _client?.RevisedChannelLifetime ?? 0;
+
+        /// <summary>Current client connection state.</summary>
         public ClientState State => _state;
 
         private bool IsDisposed => Volatile.Read(ref _disposed) != 0;
@@ -57,6 +77,9 @@ namespace TinyUa.Core.Client
                 throw new ObjectDisposedException(nameof(UaClient));
         }
 
+        /// <summary>
+        /// Enable debug mode to print detailed secure channel handshake information to the console.
+        /// </summary>
         public bool DebugMode
         {
             get => _debugMode;
@@ -68,20 +91,37 @@ namespace TinyUa.Core.Client
         }
         private bool _debugMode;
 
+        /// <summary>Raised when the connection state changes. Argument is the new <see cref="ClientState"/>.</summary>
         public event Action<ClientState>? StateChanged;
 
+        /// <summary>
+        /// Raised when subscriptions are recovered after reconnect.
+        /// Argument is <c>true</c> for lossless recovery (no data lost), <c>false</c> if subscriptions were rebuilt with potential data loss.
+        /// </summary>
         public event Action<bool>? SubscriptionsRecovered;
 
+        /// <summary>
+        /// Raised during reconnect backoff, useful for monitoring/logging.
+        /// Arguments are (current retry count, current backoff delay in ms).
+        /// </summary>
         public event Action<int, int>? ReconnectBackoff;
 
+        /// <summary>Create a client with default options. URL must be set before calling <see cref="RunAsync()"/>.</summary>
         public UaClient() : this(UaClientOptions.Default) { }
 
+        /// <summary>Create a client with a URL and default options. Prefer <see cref="ConnectTo(string)"/> for fluent configuration.</summary>
+        /// <param name="endpointUrl">OPC UA server URL, e.g. <c>opc.tcp://localhost:4840</c>.</param>
+        /// <param name="options">Optional configuration overrides.</param>
+        /// <param name="logger">Optional logger.</param>
         public UaClient(string endpointUrl, UaClientOptions? options = null, ILogger? logger = null)
             : this(options ?? UaClientOptions.Default, logger)
         {
             _endpointUrl = endpointUrl ?? throw new ArgumentNullException(nameof(endpointUrl));
         }
 
+        /// <summary>Create a client with explicit options. URL must be set in the <c>ConnectTo(url)</c> step.</summary>
+        /// <param name="options">Client configuration. Must not be <c>null</c>.</param>
+        /// <param name="logger">Optional logger.</param>
         public UaClient(UaClientOptions options, ILogger? logger = null)
         {
             _options = options ?? throw new ArgumentNullException(nameof(options));
@@ -90,8 +130,17 @@ namespace TinyUa.Core.Client
             _subscriptionRouter = new SubscriptionRouter(_client);
         }
 
+        /// <summary>Start connection without cancellation. Performs full handshake: Hello → OpenChannel → CreateSession → ActivateSession.</summary>
         public Task RunAsync() => RunAsync(CancellationToken.None);
 
+        /// <summary>
+        /// Start connection with full handshake. If reconnect is enabled (default), will not return failure
+        /// until all retries are exhausted. State transitions to <see cref="ClientState.Connected"/> on success.
+        /// </summary>
+        /// <param name="cancellationToken">Cancellation token for the connection attempt.</param>
+        /// <exception cref="InvalidOperationException">No endpoint URL has been set.</exception>
+        /// <exception cref="ObjectDisposedException">Client has been disposed.</exception>
+        /// <exception cref="UaConnectionException">All reconnect attempts failed.</exception>
         public async Task RunAsync(CancellationToken cancellationToken)
         {
             if (string.IsNullOrEmpty(_endpointUrl))
@@ -390,6 +439,7 @@ namespace TinyUa.Core.Client
             return UserIdentityToken.Anonymous();
         }
 
+        /// <summary>Stop the connection and release the session. Returns immediately if already disconnected.</summary>
         public Task StopAsync()
         {
 
@@ -676,6 +726,16 @@ namespace TinyUa.Core.Client
             }
         }
 
+        /// <summary>
+        /// Read a single node value. Includes automatic reconnect and connection-error retry.
+        /// </summary>
+        /// <param name="nodeId">The node to read.</param>
+        /// <param name="attributeId">The attribute to read, default <see cref="AttributeId.Value"/>.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>The <see cref="DataValue"/>, or <c>null</c> on connection failure or in <see cref="ErrorMode.ReturnNull"/> mode.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="nodeId"/> is <c>null</c>.</exception>
+        /// <exception cref="UaConnectionException">Reconnect timed out or failed (<see cref="ErrorMode.Throw"/> mode only).</exception>
+        /// <exception cref="UaOperationException">Non-connection error (<see cref="ErrorMode.Throw"/> mode only).</exception>
         public async Task<DataValue?> ReadAsync(NodeId nodeId, AttributeId attributeId = AttributeId.Value, CancellationToken cancellationToken = default)
         {
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
@@ -683,6 +743,15 @@ namespace TinyUa.Core.Client
             return results != null && results.Length > 0 ? results[0] : null;
         }
 
+        /// <summary>
+        /// Read multiple node values in batch. Includes automatic reconnect and connection-error retry.
+        /// </summary>
+        /// <param name="nodeIds">The nodes to read. Must not be empty.</param>
+        /// <param name="attributeId">The attribute to read, default <see cref="AttributeId.Value"/>.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>Array of results, one per input node.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="nodeIds"/> is <c>null</c>.</exception>
+        /// <exception cref="ArgumentException"><paramref name="nodeIds"/> is an empty array.</exception>
         public async Task<DataValue[]?> ReadAsync(NodeId[] nodeIds, AttributeId attributeId = AttributeId.Value, CancellationToken cancellationToken = default)
         {
             if (nodeIds == null) throw new ArgumentNullException(nameof(nodeIds));
@@ -690,6 +759,13 @@ namespace TinyUa.Core.Client
             return await ExecuteWithRetryAsync("Read", () => _client!.ReadAsync(nodeIds, attributeId), cancellationToken).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Read a single node and cast to the specified type. Recommended for everyday use.
+        /// </summary>
+        /// <typeparam name="T">Target type, e.g. <c>int</c>, <c>double</c>, <c>string</c>, <c>DateTime</c>.</typeparam>
+        /// <param name="nodeId">The node to read.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>The typed value, or <c>default(T)</c> on failure or type mismatch.</returns>
         public async Task<T?> ReadValueAsync<T>(NodeId nodeId, CancellationToken cancellationToken = default)
         {
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
@@ -697,6 +773,13 @@ namespace TinyUa.Core.Client
             return ExtractValue<T>(results);
         }
 
+        /// <summary>
+        /// Read a specific attribute of a single node and cast to the specified type.
+        /// </summary>
+        /// <typeparam name="T">Target type.</typeparam>
+        /// <param name="nodeId">The node to read.</param>
+        /// <param name="attributeId">The attribute to read.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
         public async Task<T?> ReadValueAsync<T>(NodeId nodeId, AttributeId attributeId, CancellationToken cancellationToken = default)
         {
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
@@ -714,6 +797,14 @@ namespace TinyUa.Core.Client
             return default;
         }
 
+        /// <summary>
+        /// Read a node by string NodeId and cast to the specified type. The most convenient read method.
+        /// Supports formats like <c>"i=2258"</c>, <c>"ns=2;s=Temperature"</c>.
+        /// </summary>
+        /// <typeparam name="T">Target type.</typeparam>
+        /// <param name="nodeIdString">The NodeId string.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>The typed value.</returns>
         public async Task<T?> ReadValueAsync<T>(string nodeIdString, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrEmpty(nodeIdString))
@@ -722,6 +813,15 @@ namespace TinyUa.Core.Client
             return await ReadValueAsync<T>(nodeId, cancellationToken).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Write a value to a single node. Includes automatic reconnect and connection-error retry.
+        /// The OPC UA type is inferred from the CLR type automatically.
+        /// </summary>
+        /// <param name="nodeId">The target node.</param>
+        /// <param name="value">The value to write (<c>int</c>, <c>double</c>, <c>string</c>, <c>bool</c>, etc.).</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>The result status code, <see cref="StatusCode.Good"/> on success.</returns>
+        /// <exception cref="ArgumentNullException"><paramref name="nodeId"/> is <c>null</c>.</exception>
         public async Task<StatusCode?> WriteAsync(NodeId nodeId, object value, CancellationToken cancellationToken = default)
         {
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
@@ -729,6 +829,12 @@ namespace TinyUa.Core.Client
             return results != null && results.Length > 0 ? results[0] : null;
         }
 
+        /// <summary>
+        /// Write multiple nodes in batch (supports different values and types per node).
+        /// </summary>
+        /// <param name="values">The nodes and values to write.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>Array of status codes, one per input.</returns>
         public async Task<StatusCode[]?> WriteAsync(WriteValue[] values, CancellationToken cancellationToken = default)
         {
             if (values == null) throw new ArgumentNullException(nameof(values));
@@ -736,6 +842,13 @@ namespace TinyUa.Core.Client
             return await ExecuteWithRetryAsync("Write", () => _client!.WriteAsync(values), cancellationToken).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Write a value using a string NodeId. The most convenient write method.
+        /// </summary>
+        /// <param name="nodeIdString">The NodeId string, e.g. <c>"ns=2;s=SetPoint"</c>.</param>
+        /// <param name="value">The value to write.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>The result status code.</returns>
         public Task<StatusCode?> WriteAsync(string nodeIdString, object value, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrEmpty(nodeIdString))
@@ -743,12 +856,26 @@ namespace TinyUa.Core.Client
             return WriteAsync(ParseNodeId(nodeIdString), value, cancellationToken);
         }
 
+        /// <summary>
+        /// Write a strongly-typed value without returning a status code. Use when the result is not needed.
+        /// </summary>
+        /// <typeparam name="T">The value type.</typeparam>
+        /// <param name="nodeId">The target node.</param>
+        /// <param name="value">The value to write.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
         public async Task WriteValueAsync<T>(NodeId nodeId, T value, CancellationToken cancellationToken = default)
         {
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
             await WriteAsync(nodeId, value!, cancellationToken).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Write a strongly-typed value using a string NodeId.
+        /// </summary>
+        /// <typeparam name="T">The value type.</typeparam>
+        /// <param name="nodeIdString">The NodeId string.</param>
+        /// <param name="value">The value to write.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
         public async Task WriteValueAsync<T>(string nodeIdString, T value, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrEmpty(nodeIdString))
@@ -757,12 +884,29 @@ namespace TinyUa.Core.Client
             await WriteAsync(nodeId, value!, cancellationToken).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Browse the children of a node. Each <see cref="BrowseResult"/> contains a
+        /// <see cref="BrowseResult.References"/> array of <see cref="ReferenceDescription"/> entries.
+        /// If the number of references exceeds <paramref name="maxReferences"/>, the result includes a
+        /// <see cref="BrowseResult.ContinuationPoint"/> for use with <see cref="BrowseNextAsync"/>.
+        /// </summary>
+        /// <param name="nodeId">The starting node.</param>
+        /// <param name="direction">Browse direction, default Forward.</param>
+        /// <param name="maxReferences">Max references per response, default 100.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>Array of browse results.</returns>
         public async Task<BrowseResult[]?> BrowseAsync(NodeId nodeId, BrowseDirection direction = BrowseDirection.Forward, uint maxReferences = 100, CancellationToken cancellationToken = default)
         {
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
             return await ExecuteWithRetryAsync("Browse", () => _client!.BrowseAsync(nodeId, direction, maxReferences), cancellationToken).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Continue browsing from a previous result. Pass the <see cref="BrowseResult.ContinuationPoint"/>.
+        /// </summary>
+        /// <param name="continuationPoint">The continuation point from a previous browse.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>Subsequent browse results.</returns>
         public async Task<BrowseResult[]?> BrowseNextAsync(byte[] continuationPoint, CancellationToken cancellationToken = default)
         {
             if (continuationPoint == null) throw new ArgumentNullException(nameof(continuationPoint));
@@ -817,6 +961,13 @@ namespace TinyUa.Core.Client
             }
         }
 
+        /// <summary>
+        /// Create a subscription. Multiple calls with the same <paramref name="publishingInterval"/>
+        /// will share a single subscription. Subscriptions are automatically recovered on reconnect.
+        /// </summary>
+        /// <param name="publishingInterval">Publishing interval in milliseconds, default 1000.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>A <see cref="Subscription"/> with publishing already started.</returns>
         public async Task<Subscription> CreateSubscriptionAsync(double publishingInterval = 1000.0, CancellationToken cancellationToken = default)
         {
             await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
@@ -847,6 +998,9 @@ namespace TinyUa.Core.Client
             return sub;
         }
 
+        /// <summary>Delete a subscription and all its monitored items.</summary>
+        /// <param name="subscription">The subscription to delete.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
         public async Task DeleteSubscriptionAsync(Subscription subscription, CancellationToken cancellationToken = default)
         {
             if (subscription == null) throw new ArgumentNullException(nameof(subscription));
@@ -856,12 +1010,27 @@ namespace TinyUa.Core.Client
             await subscription.DeleteAsync().ConfigureAwait(false);
         }
 
+        /// <summary>Delete specific monitored items from a subscription.</summary>
+        /// <param name="subscription">The parent subscription.</param>
+        /// <param name="monitoredItemIds">The monitored item IDs to remove.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>Status code for each delete operation.</returns>
         public async Task<StatusCode[]> DeleteMonitoredItemsAsync(Subscription subscription, uint[] monitoredItemIds, CancellationToken cancellationToken = default)
         {
             if (subscription == null) throw new ArgumentNullException(nameof(subscription));
             return await subscription.DeleteMonitoredItemsAsync(monitoredItemIds).ConfigureAwait(false);
         }
 
+        /// <summary>
+        /// Subscribe to data changes for a single node. Creates or reuses a subscription at the same interval.
+        /// The returned <c>MonitoredItemId</c> can be used with <see cref="DeleteMonitoredItemsAsync"/>.
+        /// </summary>
+        /// <param name="nodeId">The node to monitor.</param>
+        /// <param name="handler">Data change callback <see cref="DataChangeHandler"/>.</param>
+        /// <param name="interval">Sampling interval in milliseconds, default 1000.</param>
+        /// <param name="queueSize">Queue size, 0 for default.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>Subscription and monitored item ID tuple.</returns>
         public async Task<(Subscription Subscription, uint MonitoredItemId)> SubscribeAsync(
             NodeId nodeId, DataChangeHandler handler, double interval = 1000.0, uint queueSize = 0,
             CancellationToken cancellationToken = default)
@@ -876,6 +1045,15 @@ namespace TinyUa.Core.Client
             return (sub, item.MonitoredItemId);
         }
 
+        /// <summary>
+        /// Subscribe to multiple nodes in batch. All nodes share the same callback and sampling interval.
+        /// </summary>
+        /// <param name="nodeIds">The nodes to monitor.</param>
+        /// <param name="handler">Data change callback.</param>
+        /// <param name="interval">Sampling interval in milliseconds.</param>
+        /// <param name="queueSize">Queue size.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>The subscription.</returns>
         public async Task<Subscription> SubscribeAsync(NodeId[] nodeIds, DataChangeHandler handler, double interval = 1000.0, uint queueSize = 0, CancellationToken cancellationToken = default)
         {
             if (nodeIds == null) throw new ArgumentNullException(nameof(nodeIds));
@@ -914,6 +1092,13 @@ namespace TinyUa.Core.Client
             }, sub);
         }
 
+        /// <summary>
+        /// Parse an OPC UA NodeId string. Supported formats:
+        /// <c>"i=2258"</c> (numeric), <c>"s=Temperature"</c> (string),
+        /// <c>"g=..."</c> (GUID), <c>"ns=2;s=Temperature"</c> (with namespace).
+        /// </summary>
+        /// <param name="nodeIdString">The NodeId string to parse.</param>
+        /// <exception cref="ArgumentException"><paramref name="nodeIdString"/> is null, empty, or unrecognized.</exception>
         public static NodeId ParseNodeId(string nodeIdString)
         {
             if (string.IsNullOrEmpty(nodeIdString))
@@ -948,6 +1133,10 @@ namespace TinyUa.Core.Client
             }
         }
 
+        /// <summary>
+        /// Release client resources: disconnect, stop reconnect engine, release socket.
+        /// Safe to call multiple times (idempotent).
+        /// </summary>
         public async ValueTask DisposeAsync()
         {
 
@@ -959,6 +1148,22 @@ namespace TinyUa.Core.Client
             GC.SuppressFinalize(this);
         }
 
+        /// <summary>
+        /// Subscribe to data changes with a type-safe callback. OPC UA values are automatically cast to <typeparamref name="T"/>.
+        /// This is the most commonly used subscription method.
+        /// </summary>
+        /// <typeparam name="T">The data type.</typeparam>
+        /// <param name="nodeIdString">The NodeId string.</param>
+        /// <param name="onDataChanged">Type-safe callback <c>Action&lt;T?&gt;</c>.</param>
+        /// <param name="interval">Sampling interval in milliseconds, default 1000.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>The subscription—call <c>Dispose()</c> to unsubscribe.</returns>
+        /// <example>
+        /// <code>
+        /// var sub = await client.SubscribeAsync&lt;DateTime&gt;("i=2258", val =>
+        ///     Console.WriteLine($"Tick: {val:HH:mm:ss.fff}"), interval: 500);
+        /// </code>
+        /// </example>
         public async Task<Subscription> SubscribeAsync<T>(
             string nodeIdString,
             Action<T?> onDataChanged,
@@ -980,6 +1185,16 @@ namespace TinyUa.Core.Client
             return sub;
         }
 
+        /// <summary>
+        /// Subscribe to data changes with a type-safe callback that includes the quality <see cref="StatusCode"/>.
+        /// Useful when you need to know both the value and its quality.
+        /// </summary>
+        /// <typeparam name="T">The data type.</typeparam>
+        /// <param name="nodeIdString">The NodeId string.</param>
+        /// <param name="onDataChanged">Callback <c>Action&lt;T?, StatusCode&gt;</c> — second argument is the quality.</param>
+        /// <param name="interval">Sampling interval in milliseconds, default 1000.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>The subscription.</returns>
         public async Task<Subscription> SubscribeAsync<T>(
             string nodeIdString,
             Action<T?, StatusCode> onDataChanged,
@@ -1001,12 +1216,27 @@ namespace TinyUa.Core.Client
             return sub;
         }
 
+        /// <summary>
+        /// Start the fluent configuration chain. Use <c>.WithSecurity(...)</c>, <c>.WithUserName(...)</c>,
+        /// <c>.WithAppName(...)</c>, etc., then call <c>.BuildAndRunAsync()</c> to connect.
+        /// </summary>
+        /// <param name="endpointUrl">OPC UA server URL, e.g. <c>opc.tcp://localhost:4840</c>.</param>
+        /// <returns>A <see cref="ClientBuilder"/> for fluent configuration.</returns>
         public static ClientBuilder ConnectTo(string endpointUrl)
             => new ClientBuilder(endpointUrl);
 
+        /// <summary>
+        /// Start the fluent configuration chain from a <see cref="Uri"/>.
+        /// </summary>
         public static ClientBuilder ConnectTo(Uri endpointUri)
             => new ClientBuilder(endpointUri.ToString());
 
+        /// <summary>
+        /// Fluent builder for configuring and connecting a <see cref="UaClient"/>.
+        /// All <c>With*</c> methods return the builder for chaining.
+        /// Call <see cref="Build"/> to create the client without connecting,
+        /// or <see cref="BuildAndRunAsync"/> to create and connect immediately.
+        /// </summary>
         public class ClientBuilder
         {
             private readonly string _endpointUrl;
@@ -1017,13 +1247,29 @@ namespace TinyUa.Core.Client
 
             internal ClientBuilder(string endpointUrl) { _endpointUrl = endpointUrl; }
 
+            /// <summary>Set per-step network timeout (socket I/O and reconnect attempts). Default 30000ms.</summary>
+            /// <param name="milliseconds">Timeout in milliseconds.</param>
             public ClientBuilder WithRequestTimeout(int milliseconds) { _options.Timeout = (uint)milliseconds; return this; }
+
+            /// <summary>Set the application name displayed in server session diagnostics. Also updates the ApplicationUri.</summary>
             public ClientBuilder WithAppName(string name) { _options.ApplicationName = name; _options.ApplicationUri = $"urn:{name}:{Guid.NewGuid()}"; return this; }
+
+            /// <summary>Disable automatic reconnect. Equivalent to <c>WithReconnectRetries(0)</c>.</summary>
             public ClientBuilder WithoutReconnect() { _reconnect = false; return this; }
+
+            /// <summary>Set maximum reconnect attempts. Default -1 (infinite). Set to 0 to disable.</summary>
             public ClientBuilder WithReconnectRetries(int maxRetries) { _options.ReconnectMaxRetries = maxRetries; return this; }
+
+            /// <summary>Set the session timeout in milliseconds. Default 3600000 (1 hour).</summary>
             public ClientBuilder WithSessionTimeout(int ms) { _options.SessionTimeout = ms; return this; }
+
+            /// <summary>Set the error handling strategy. Default <see cref="ErrorMode.Throw"/>.</summary>
             public ClientBuilder WithErrorMode(ErrorMode mode) { _options.ErrorMode = mode; return this; }
 
+            /// <summary>
+            /// Set the security policy by short name (e.g. <c>"Basic256Sha256"</c>, <c>"Aes128_Sha256_RsaOaep"</c>,
+            /// <c>"Aes256_Sha256_RsaPss"</c>, <c>"None"</c>). Non-None policies auto-enable SignAndEncrypt mode.
+            /// </summary>
             public ClientBuilder WithSecurity(string policy)
             {
                 _options.Security.Policy = policy;
@@ -1032,12 +1278,17 @@ namespace TinyUa.Core.Client
                 return this;
             }
 
+            /// <summary>Configure security with a callback for full control over <see cref="SecurityOptions"/>.</summary>
+            /// <param name="configure">Action that receives the <see cref="SecurityOptions"/> to modify.</param>
             public ClientBuilder WithSecurity(Action<SecurityOptions> configure)
             {
                 configure(_options.Security);
                 return this;
             }
 
+            /// <summary>Set username/password authentication. The password is RSA-OAEP encrypted before transmission.</summary>
+            /// <param name="username">The username.</param>
+            /// <param name="password">The password (plaintext, will be encrypted for transmission).</param>
             public ClientBuilder WithUserName(string username, string password)
             {
                 _options.Security.UserIdentity.Type = TinyUa.Core.Security.UserTokenType.UserName;
@@ -1046,20 +1297,29 @@ namespace TinyUa.Core.Client
                 return this;
             }
 
+            /// <summary>Attach a custom <see cref="ILogger"/> implementation.</summary>
             public ClientBuilder WithLogger(ILogger logger) { _logger = logger; return this; }
 
+            /// <summary>Enable console logging via a simple callback. For custom loggers, use <see cref="WithLogger"/> instead.</summary>
+            /// <param name="sink">Callback receiving (LogLevel, Exception?, message).</param>
+            /// <param name="minLevel">Minimum log level to record. Default <see cref="LogLevel.Debug"/>.</param>
             public ClientBuilder EnableLog(Action<LogLevel, Exception?, string> sink, LogLevel minLevel = LogLevel.Debug)
             {
                 _logger = new DelegateLogger(sink, minLevel);
                 return this;
             }
 
+            /// <summary>Enable logging to a directory. Log files are auto-created and auto-rotated.</summary>
+            /// <param name="directory">Directory path for log files (created if needed).</param>
+            /// <param name="minLevel">Minimum log level. Default <see cref="LogLevel.Debug"/>.</param>
+            /// <param name="async">Use asynchronous file writes. Default false.</param>
             public ClientBuilder EnableLogFile(string directory, LogLevel minLevel = LogLevel.Debug, bool async = false)
             {
                 _logger = new FileLogger(directory, minLevel, async);
                 return this;
             }
 
+            /// <summary>Build the <see cref="UaClient"/> without connecting. Call <see cref="UaClient.RunAsync()"/> to connect later.</summary>
             public UaClient Build()
             {
                 _options.ReconnectMaxRetries = _reconnect ? _options.ReconnectMaxRetries : 0;
@@ -1068,6 +1328,8 @@ namespace TinyUa.Core.Client
                 return client;
             }
 
+            /// <summary>Build the client and connect immediately. Equivalent to <c>Build()</c> followed by <c>RunAsync()</c>.</summary>
+            /// <returns>A connected <see cref="UaClient"/> ready for operations.</returns>
             public async Task<UaClient> BuildAndRunAsync()
             {
                 var client = Build();

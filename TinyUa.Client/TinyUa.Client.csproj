@@ -8,6 +8,8 @@
     <AssemblyName>TinyUa.Client</AssemblyName>
     <Description>OPC UA Client Library</Description>
     <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

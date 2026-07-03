@@ -10,6 +10,12 @@ using TinyUa.Core.Client.Services;
 
 namespace TinyUa.Core.Client.Subscriptions
 {
+    /// <summary>
+    /// Represents a callback that is invoked when a monitored item value changes.
+    /// </summary>
+    /// <param name="clientHandle">The client-assigned handle that identifies the monitored item.</param>
+    /// <param name="value">The new value reported by the server, or null if no value is available.</param>
+    /// <param name="status">The status code associated with the data change.</param>
     public delegate void DataChangeHandler(uint clientHandle, object? value, StatusCode status);
 
     internal static class SubscriptionManager
@@ -33,6 +39,10 @@ namespace TinyUa.Core.Client.Subscriptions
         }
     }
 
+    /// <summary>
+    /// Represents a single item being monitored within a subscription.
+    /// Tracks the item's identifier, node, sampling configuration, and the latest received value.
+    /// </summary>
     public class MonitoredItem
     {
         internal uint MonitoredItemId { get; set; }
@@ -44,6 +54,11 @@ namespace TinyUa.Core.Client.Subscriptions
         internal DataChangeHandler? OnDataChange { get; set; }
     }
 
+    /// <summary>
+    /// Represents an OPC UA subscription that manages a publish loop and a collection of monitored items.
+    /// Maintains credits, sequence numbers, and forwards notifications to registered handlers.
+    /// Call <see cref="Dispose"/> to stop publishing and release resources.
+    /// </summary>
     public class Subscription : IDisposable
     {
         private readonly SubscriptionRouter _router;
@@ -419,6 +434,10 @@ namespace TinyUa.Core.Client.Subscriptions
             }
         }
 
+        /// <summary>
+        /// Stops the publish loop and releases all resources held by this subscription.
+        /// Safe to call multiple times; subsequent calls have no effect.
+        /// </summary>
         public void Dispose()
         {
             if (Interlocked.CompareExchange(ref _isDisposed, 1, 0) != 0) return;

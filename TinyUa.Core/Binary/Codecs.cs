@@ -4,8 +4,17 @@ using TinyUa.Core.Types;
 
 namespace TinyUa.Core.Binary
 {
+    /// <summary>
+    /// Provides binary encoding and decoding for <see cref="NodeId"/> values according to the OPC UA Binary Encoding specification.
+    /// </summary>
     public static class NodeIdCodec
     {
+        /// <summary>
+        /// Encodes a <see cref="NodeId"/> into the given <paramref name="encoder"/>.
+        /// A null node id is encoded as a two-byte NodeId with identifier 0.
+        /// </summary>
+        /// <param name="encoder">The <see cref="BinaryEncoder"/> to write to.</param>
+        /// <param name="nodeId">The <see cref="NodeId"/> to encode, or null.</param>
         public static void Encode(BinaryEncoder encoder, NodeId? nodeId)
         {
             if (nodeId == null)
@@ -84,6 +93,11 @@ namespace TinyUa.Core.Binary
             }
         }
 
+        /// <summary>
+        /// Decodes a <see cref="NodeId"/> from the given <paramref name="decoder"/>.
+        /// </summary>
+        /// <param name="decoder">The <see cref="BinaryDecoder"/> to read from.</param>
+        /// <returns>The decoded <see cref="NodeId"/>.</returns>
         public static NodeId Decode(BinaryDecoder decoder)
         {
             var encodingByte = decoder.ReadByte();
@@ -145,8 +159,18 @@ namespace TinyUa.Core.Binary
         }
     }
 
+    /// <summary>
+    /// Provides binary encoding and decoding for <see cref="Variant"/> values according to the OPC UA Binary Encoding specification.
+    /// Supports both scalar and array variants with optional multi-dimensional dimensions.
+    /// </summary>
     public static class VariantCodec
     {
+        /// <summary>
+        /// Encodes a <see cref="Variant"/> into the given <paramref name="encoder"/>.
+        /// A null variant or one with <see cref="VariantType.Null"/> is encoded as a single null byte.
+        /// </summary>
+        /// <param name="encoder">The <see cref="BinaryEncoder"/> to write to.</param>
+        /// <param name="variant">The <see cref="Variant"/> to encode, or null.</param>
         public static void Encode(BinaryEncoder encoder, Variant? variant)
         {
             if (variant == null || variant.VariantType == VariantType.Null)
@@ -272,6 +296,11 @@ namespace TinyUa.Core.Binary
                 }
             }
 
+        /// <summary>
+        /// Decodes a <see cref="Variant"/> from the given <paramref name="decoder"/>.
+        /// </summary>
+        /// <param name="decoder">The <see cref="BinaryDecoder"/> to read from.</param>
+        /// <returns>The decoded <see cref="Variant"/>.</returns>
         public static Variant Decode(BinaryDecoder decoder)
         {
             var encodingByte = decoder.ReadByte();
@@ -385,13 +414,26 @@ namespace TinyUa.Core.Binary
         }
     }
 
+    /// <summary>
+    /// Provides binary encoding and decoding for <see cref="ExpandedNodeId"/> values, delegating to <see cref="NodeIdCodec"/>.
+    /// </summary>
     public static class ExpandedNodeIdCodec
     {
+        /// <summary>
+        /// Encodes an <see cref="ExpandedNodeId"/> by delegating to <see cref="NodeIdCodec.Encode"/>.
+        /// </summary>
+        /// <param name="encoder">The <see cref="BinaryEncoder"/> to write to.</param>
+        /// <param name="nodeId">The <see cref="ExpandedNodeId"/> to encode.</param>
         public static void Encode(BinaryEncoder encoder, ExpandedNodeId nodeId)
         {
             NodeIdCodec.Encode(encoder, nodeId);
         }
 
+        /// <summary>
+        /// Decodes an <see cref="ExpandedNodeId"/> from the given <paramref name="decoder"/>.
+        /// </summary>
+        /// <param name="decoder">The <see cref="BinaryDecoder"/> to read from.</param>
+        /// <returns>The decoded <see cref="ExpandedNodeId"/>.</returns>
         public static ExpandedNodeId Decode(BinaryDecoder decoder)
         {
             var nodeId = NodeIdCodec.Decode(decoder);
@@ -401,8 +443,17 @@ namespace TinyUa.Core.Binary
         }
     }
 
+    /// <summary>
+    /// Provides binary encoding and decoding for <see cref="QualifiedName"/> values.
+    /// </summary>
     public static class QualifiedNameCodec
     {
+        /// <summary>
+        /// Encodes a <see cref="QualifiedName"/> into the given <paramref name="encoder"/>.
+        /// A null value is encoded as namespace index 0 with a null name.
+        /// </summary>
+        /// <param name="encoder">The <see cref="BinaryEncoder"/> to write to.</param>
+        /// <param name="name">The <see cref="QualifiedName"/> to encode, or null.</param>
         public static void Encode(BinaryEncoder encoder, QualifiedName? name)
         {
             if (name == null)
@@ -415,6 +466,11 @@ namespace TinyUa.Core.Binary
             encoder.WriteString(name.Name);
         }
 
+        /// <summary>
+        /// Decodes a <see cref="QualifiedName"/> from the given <paramref name="decoder"/>.
+        /// </summary>
+        /// <param name="decoder">The <see cref="BinaryDecoder"/> to read from.</param>
+        /// <returns>The decoded <see cref="QualifiedName"/>.</returns>
         public static QualifiedName? Decode(BinaryDecoder decoder)
         {
             var nsIndex = decoder.ReadUInt16();
@@ -423,8 +479,18 @@ namespace TinyUa.Core.Binary
         }
     }
 
+    /// <summary>
+    /// Provides binary encoding and decoding for <see cref="LocalizedText"/> values.
+    /// Uses an encoding mask byte where bit 0 indicates locale is present and bit 1 indicates text is present.
+    /// </summary>
     public static class LocalizedTextCodec
     {
+        /// <summary>
+        /// Encodes a <see cref="LocalizedText"/> into the given <paramref name="encoder"/>.
+        /// A null value is encoded as a single zero byte.
+        /// </summary>
+        /// <param name="encoder">The <see cref="BinaryEncoder"/> to write to.</param>
+        /// <param name="text">The <see cref="LocalizedText"/> to encode, or null.</param>
         public static void Encode(BinaryEncoder encoder, LocalizedText? text)
         {
             if (text == null)
@@ -440,6 +506,11 @@ namespace TinyUa.Core.Binary
             if (text.Text != null) encoder.WriteString(text.Text);
         }
 
+        /// <summary>
+        /// Decodes a <see cref="LocalizedText"/> from the given <paramref name="decoder"/>.
+        /// </summary>
+        /// <param name="decoder">The <see cref="BinaryDecoder"/> to read from.</param>
+        /// <returns>The decoded <see cref="LocalizedText"/>.</returns>
         public static LocalizedText? Decode(BinaryDecoder decoder)
         {
             var encoding = decoder.ReadByte();

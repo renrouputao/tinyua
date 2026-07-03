@@ -8,7 +8,9 @@ using System.Threading.Tasks;
 
 namespace TinyUa.Core.Logging
 {
-
+    /// <summary>
+    /// An <see cref="ILogger"/> implementation that writes log entries to date-based rolling files, with optional asynchronous writing.
+    /// </summary>
     public sealed class FileLogger : ILogger, IDisposable
     {
         private readonly string _directory;
@@ -26,8 +28,21 @@ namespace TinyUa.Core.Logging
         private const int MaxQueueSize = 4096;
         private int _droppedCount;
 
+        /// <summary>
+        /// Gets the number of log entries that have been dropped due to a full queue (async mode only).
+        /// </summary>
         public int DroppedCount => Volatile.Read(ref _droppedCount);
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="FileLogger"/> class.
+        /// </summary>
+        /// <param name="directory">The directory where log files will be created.</param>
+        /// <param name="minLevel">The minimum <see cref="LogLevel"/> to log. Defaults to <see cref="LogLevel.Debug"/>.</param>
+        /// <param name="async">
+        /// If <c>true</c>, log entries are written on a background thread using a concurrent queue.
+        /// If <c>false</c>, log entries are written synchronously and flushed immediately.
+        /// </param>
+        /// <exception cref="ArgumentNullException">Thrown when <paramref name="directory"/> is <c>null</c>.</exception>
         public FileLogger(string directory, LogLevel minLevel = LogLevel.Debug, bool async = false)
         {
             _directory = directory ?? throw new ArgumentNullException(nameof(directory));
@@ -41,6 +56,7 @@ namespace TinyUa.Core.Logging
                 _writerTask = Task.Run(WriterLoopAsync);
         }
 
+        /// <inheritdoc />
         public void Log(LogLevel level, Exception? exception, string message)
         {
             if (level < _minLevel) return;
@@ -69,6 +85,7 @@ namespace TinyUa.Core.Logging
             _signal.Release();
         }
 
+        /// <inheritdoc />
         public bool IsEnabled(LogLevel level) => level >= _minLevel;
 
         private async Task WriterLoopAsync()
@@ -149,6 +166,9 @@ namespace TinyUa.Core.Logging
             _                    => "???"
         };
 
+        /// <summary>
+        /// Releases all resources used by the <see cref="FileLogger"/>, flushing any pending log entries and closing the underlying file stream.
+        /// </summary>
         public void Dispose()
         {
             lock (_lock)

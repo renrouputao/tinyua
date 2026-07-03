@@ -5,25 +5,43 @@ using System.Text;
 
 namespace TinyUa.Core.Binary
 {
-
+    /// <summary>
+    /// Writes OPC UA binary-encoded data to an internal byte buffer.
+    /// All multi-byte values are written in little-endian order per the OPC UA Binary Encoding specification.
+    /// </summary>
     public class BinaryEncoder : IDisposable
     {
         private byte[] _buffer;
         private int _position;
 
+        /// <summary>
+        /// Initializes a new <see cref="BinaryEncoder"/> with a default initial capacity of 256 bytes.
+        /// </summary>
         public BinaryEncoder() : this(256) { }
 
+        /// <summary>
+        /// Initializes a new <see cref="BinaryEncoder"/> with the specified initial capacity.
+        /// </summary>
+        /// <param name="capacity">The initial buffer capacity in bytes. The actual capacity will be at least 64 bytes.</param>
         public BinaryEncoder(int capacity)
         {
             _buffer = new byte[Math.Max(capacity, 64)];
             _position = 0;
         }
 
+        /// <summary>
+        /// Returns a segment that references the written portion of the internal buffer.
+        /// </summary>
+        /// <returns>An <see cref="ArraySegment{T}"/> covering the bytes written so far.</returns>
         public ArraySegment<byte> GetBuffer()
         {
             return new ArraySegment<byte>(_buffer, 0, _position);
         }
 
+        /// <summary>
+        /// Creates a new byte array containing all bytes written so far.
+        /// </summary>
+        /// <returns>A byte array copy of the written data.</returns>
         public byte[] ToByteArray()
         {
             if (_position == 0) return Array.Empty<byte>();
@@ -32,10 +50,21 @@ namespace TinyUa.Core.Binary
             return result;
         }
 
+        /// <summary>
+        /// Returns the written bytes as an array. Use <see cref="ToByteArray"/> instead.
+        /// </summary>
+        /// <returns>A byte array copy of the written data.</returns>
         [Obsolete("Use ToByteArray() instead")]
         public byte[] ToArray() => ToByteArray();
 
+        /// <summary>
+        /// Gets the current write position (number of bytes written).
+        /// </summary>
         public int Position => _position;
+
+        /// <summary>
+        /// Gets the total number of bytes written so far.
+        /// </summary>
         public int Length => _position;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -47,24 +76,40 @@ namespace TinyUa.Core.Binary
             Array.Resize(ref _buffer, newSize);
         }
 
+        /// <summary>
+        /// Writes a <see cref="Boolean"/> as a single byte (1 for true, 0 for false).
+        /// </summary>
+        /// <param name="value">The boolean value to write.</param>
         public void WriteBoolean(bool value)
         {
             EnsureCapacity(1);
             _buffer[_position++] = value ? (byte)1 : (byte)0;
         }
 
+        /// <summary>
+        /// Writes a signed byte.
+        /// </summary>
+        /// <param name="value">The <see cref="SByte"/> to write.</param>
         public void WriteSByte(sbyte value)
         {
             EnsureCapacity(1);
             _buffer[_position++] = (byte)value;
         }
 
+        /// <summary>
+        /// Writes a single unsigned byte.
+        /// </summary>
+        /// <param name="value">The <see cref="Byte"/> to write.</param>
         public void WriteByte(byte value)
         {
             EnsureCapacity(1);
             _buffer[_position++] = value;
         }
 
+        /// <summary>
+        /// Writes a 16-bit signed integer (little-endian).
+        /// </summary>
+        /// <param name="value">The <see cref="Int16"/> to write.</param>
         public void WriteInt16(short value)
         {
             EnsureCapacity(2);
@@ -72,6 +117,10 @@ namespace TinyUa.Core.Binary
             _position += 2;
         }
 
+        /// <summary>
+        /// Writes a 16-bit unsigned integer (little-endian).
+        /// </summary>
+        /// <param name="value">The <see cref="UInt16"/> to write.</param>
         public void WriteUInt16(ushort value)
         {
             EnsureCapacity(2);
@@ -79,6 +128,10 @@ namespace TinyUa.Core.Binary
             _position += 2;
         }
 
+        /// <summary>
+        /// Writes a 32-bit signed integer (little-endian).
+        /// </summary>
+        /// <param name="value">The <see cref="Int32"/> to write.</param>
         public void WriteInt32(int value)
         {
             EnsureCapacity(4);
@@ -86,6 +139,10 @@ namespace TinyUa.Core.Binary
             _position += 4;
         }
 
+        /// <summary>
+        /// Writes a 32-bit unsigned integer (little-endian).
+        /// </summary>
+        /// <param name="value">The <see cref="UInt32"/> to write.</param>
         public void WriteUInt32(uint value)
         {
             EnsureCapacity(4);
@@ -93,6 +150,10 @@ namespace TinyUa.Core.Binary
             _position += 4;
         }
 
+        /// <summary>
+        /// Writes a 64-bit signed integer (little-endian).
+        /// </summary>
+        /// <param name="value">The <see cref="Int64"/> to write.</param>
         public void WriteInt64(long value)
         {
             EnsureCapacity(8);
@@ -100,6 +161,10 @@ namespace TinyUa.Core.Binary
             _position += 8;
         }
 
+        /// <summary>
+        /// Writes a 64-bit unsigned integer (little-endian).
+        /// </summary>
+        /// <param name="value">The <see cref="UInt64"/> to write.</param>
         public void WriteUInt64(ulong value)
         {
             EnsureCapacity(8);
@@ -107,6 +172,10 @@ namespace TinyUa.Core.Binary
             _position += 8;
         }
 
+        /// <summary>
+        /// Writes a 32-bit IEEE 754 single-precision floating-point number (little-endian).
+        /// </summary>
+        /// <param name="value">The <see cref="Single"/> to write.</param>
         public void WriteFloat(float value)
         {
             EnsureCapacity(4);
@@ -114,6 +183,10 @@ namespace TinyUa.Core.Binary
             _position += 4;
         }
 
+        /// <summary>
+        /// Writes a 64-bit IEEE 754 double-precision floating-point number (little-endian).
+        /// </summary>
+        /// <param name="value">The <see cref="Double"/> to write.</param>
         public void WriteDouble(double value)
         {
             EnsureCapacity(8);
@@ -121,6 +194,10 @@ namespace TinyUa.Core.Binary
             _position += 8;
         }
 
+        /// <summary>
+        /// Writes a length-prefixed UTF-8 string. A null value is encoded as a length of -1.
+        /// </summary>
+        /// <param name="value">The string to write, or null.</param>
         public void WriteString(string? value)
         {
             if (value == null)
@@ -147,6 +224,10 @@ namespace TinyUa.Core.Binary
             BinaryPrimitives.WriteInt32LittleEndian(_buffer.AsSpan(lengthPos), bytesWritten);
         }
 
+        /// <summary>
+        /// Writes a length-prefixed byte string. A null value is encoded as a length of -1.
+        /// </summary>
+        /// <param name="value">The byte array to write, or null.</param>
         public void WriteByteString(byte[]? value)
         {
             if (value == null)
@@ -164,12 +245,20 @@ namespace TinyUa.Core.Binary
             }
         }
 
+        /// <summary>
+        /// Writes a <see cref="DateTime"/> encoded as a Windows file-time (64-bit little-endian).
+        /// </summary>
+        /// <param name="value">The <see cref="DateTime"/> to write.</param>
         public void WriteDateTime(DateTime value)
         {
             var ticks = ToWinFileTime(value);
             WriteInt64(ticks);
         }
 
+        /// <summary>
+        /// Writes a 16-byte <see cref="Guid"/>.
+        /// </summary>
+        /// <param name="value">The <see cref="Guid"/> to write.</param>
         public void WriteGuid(Guid value)
         {
             EnsureCapacity(16);
@@ -177,6 +266,12 @@ namespace TinyUa.Core.Binary
             _position += 16;
         }
 
+        /// <summary>
+        /// Writes raw bytes from an array at a specific offset and count.
+        /// </summary>
+        /// <param name="value">The source byte array.</param>
+        /// <param name="offset">The zero-based offset in <paramref name="value"/> to start copying from.</param>
+        /// <param name="count">The number of bytes to copy.</param>
         public void WriteBytes(byte[] value, int offset, int count)
         {
             if (count <= 0) return;
@@ -185,6 +280,10 @@ namespace TinyUa.Core.Binary
             _position += count;
         }
 
+        /// <summary>
+        /// Writes the entire contents of a byte array.
+        /// </summary>
+        /// <param name="value">The byte array to write.</param>
         public void WriteBytes(byte[] value)
         {
             if (value == null || value.Length == 0) return;
@@ -206,6 +305,13 @@ namespace TinyUa.Core.Binary
             return value.Ticks - DateTime.UnixEpoch.Ticks + epochDiff;
         }
 
+        /// <summary>
+        /// Writes a length-prefixed array of elements, encoding each element with the supplied action.
+        /// A null array is encoded as a length of -1.
+        /// </summary>
+        /// <typeparam name="T">The element type.</typeparam>
+        /// <param name="array">The array to write, or null.</param>
+        /// <param name="writeElement">An action that encodes a single element.</param>
         public void WriteArray<T>(T[] array, Action<T> writeElement)
         {
             if (array == null)
@@ -221,6 +327,13 @@ namespace TinyUa.Core.Binary
             }
         }
 
+        /// <summary>
+        /// Writes a length-prefixed array of elements, encoding each element with the supplied action that receives this encoder.
+        /// A null array is encoded as a length of -1.
+        /// </summary>
+        /// <typeparam name="T">The element type.</typeparam>
+        /// <param name="array">The array to write, or null.</param>
+        /// <param name="writeElement">An action that encodes a single element, receiving this encoder as the first argument.</param>
         public void WriteArray<T>(T[] array, Action<BinaryEncoder, T> writeElement)
         {
             if (array == null)
@@ -236,11 +349,17 @@ namespace TinyUa.Core.Binary
             }
         }
 
+        /// <summary>
+        /// Resets the write position to 0, allowing the encoder to be reused without reallocating the internal buffer.
+        /// </summary>
         public void Reset()
         {
             _position = 0;
         }
 
+        /// <summary>
+        /// Releases all resources used by the <see cref="BinaryEncoder"/>.
+        /// </summary>
         public void Dispose()
         {
 

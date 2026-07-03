@@ -2,43 +2,95 @@ using System;
 
 namespace TinyUa.Core.Types
 {
+    /// <summary>
+    /// Enumerates the OPC UA built-in data types that a <see cref="Variant"/> can hold.
+    /// </summary>
     public enum VariantType : byte
     {
+        /// <summary>A null / empty value.</summary>
         Null = 0,
+        /// <summary>A Boolean value.</summary>
         Boolean = 1,
+        /// <summary>A signed 8-bit integer.</summary>
         SByte = 2,
+        /// <summary>An unsigned 8-bit integer.</summary>
         Byte = 3,
+        /// <summary>A signed 16-bit integer.</summary>
         Int16 = 4,
+        /// <summary>An unsigned 16-bit integer.</summary>
         UInt16 = 5,
+        /// <summary>A signed 32-bit integer.</summary>
         Int32 = 6,
+        /// <summary>An unsigned 32-bit integer.</summary>
         UInt32 = 7,
+        /// <summary>A signed 64-bit integer.</summary>
         Int64 = 8,
+        /// <summary>An unsigned 64-bit integer.</summary>
         UInt64 = 9,
+        /// <summary>An IEEE 754 single-precision float.</summary>
         Float = 10,
+        /// <summary>An IEEE 754 double-precision float.</summary>
         Double = 11,
+        /// <summary>A UTF-8 string.</summary>
         String = 12,
+        /// <summary>A date/time value.</summary>
         DateTime = 13,
+        /// <summary>A 128-bit GUID.</summary>
         Guid = 14,
+        /// <summary>An opaque byte string.</summary>
         ByteString = 15,
+        /// <summary>An XML element.</summary>
         XmlElement = 16,
+        /// <summary>A <see cref="NodeId"/> value.</summary>
         NodeId = 17,
+        /// <summary>An <see cref="ExpandedNodeId"/> value.</summary>
         ExpandedNodeId = 18,
+        /// <summary>A <see cref="StatusCode"/> value.</summary>
         StatusCode = 19,
+        /// <summary>A <see cref="QualifiedName"/> value.</summary>
         QualifiedName = 20,
+        /// <summary>A <see cref="LocalizedText"/> value.</summary>
         LocalizedText = 21,
+        /// <summary>An <see cref="ExtensionObject"/> value.</summary>
         ExtensionObject = 22,
+        /// <summary>A <see cref="DataValue"/> value.</summary>
         DataValue = 23,
+        /// <summary>A nested <see cref="Variant"/> value.</summary>
         Variant = 24,
+        /// <summary>A diagnostic info value.</summary>
         DiagnosticInfo = 25
     }
 
+    /// <summary>
+    /// Represents an OPC UA Variant, a union-like type that can hold any of the
+    /// OPC UA built-in data types together with optional array dimensions.
+    /// </summary>
     public class Variant
     {
+        /// <summary>
+        /// Gets the OPC UA type of the value held by this variant.
+        /// </summary>
         public VariantType VariantType { get; private set; }
+
+        /// <summary>
+        /// Gets the underlying value. May be null. Interpret according to <see cref="VariantType"/>.
+        /// </summary>
         public object? Value { get; private set; }
+
+        /// <summary>
+        /// Gets a value indicating whether the variant holds an array (excluding byte arrays,
+        /// which are treated as <see cref="VariantType.ByteString"/>).
+        /// </summary>
         public bool IsArray { get; internal set; }
+
+        /// <summary>
+        /// Gets the dimensions of a multi-dimensional array, or null for a flat array or scalar value.
+        /// </summary>
         public int[]? Dimensions { get; internal set; }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="Variant"/> class with a null value.
+        /// </summary>
         public Variant()
         {
             VariantType = VariantType.Null;
@@ -47,6 +99,12 @@ namespace TinyUa.Core.Types
             Dimensions = null;
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="Variant"/> class with the specified value.
+        /// The variant type is auto-detected from the CLR type unless explicitly provided.
+        /// </summary>
+        /// <param name="value">The value to wrap. May be null.</param>
+        /// <param name="type">Optional explicit OPC UA type. If null, the type is guessed from the CLR type.</param>
         public Variant(object? value, VariantType? type = null)
         {
             Value = value;
@@ -64,6 +122,11 @@ namespace TinyUa.Core.Types
             }
         }
 
+        /// <summary>
+        /// Guesses the OPC UA variant type from a CLR value.
+        /// </summary>
+        /// <param name="value">The CLR value to inspect.</param>
+        /// <returns>The best-matching <see cref="VariantType"/>.</returns>
         private static VariantType GuessType(object? value)
         {
             if (value == null)
@@ -126,6 +189,12 @@ namespace TinyUa.Core.Types
             return VariantType.ExtensionObject;
         }
 
+        /// <summary>
+        /// Gets the value cast to type <typeparamref name="T"/>. Uses <see cref="Convert.ChangeType"/>
+        /// if a direct cast is not possible.
+        /// </summary>
+        /// <typeparam name="T">The target CLR type.</typeparam>
+        /// <returns>The value cast to <typeparamref name="T"/>.</returns>
         public T GetValue<T>()
         {
             if (Value is T typedValue)
@@ -134,6 +203,10 @@ namespace TinyUa.Core.Types
             return (T)Convert.ChangeType(Value!, typeof(T));
         }
 
+        /// <summary>
+        /// Returns a human-readable string describing this variant.
+        /// </summary>
+        /// <returns>A string in the form "Variant(value, type)" or "Variant([N elements], type)" for arrays.</returns>
         public override string ToString()
         {
             if (Value == null)
@@ -145,6 +218,9 @@ namespace TinyUa.Core.Types
             return $"Variant({Value}, {VariantType})";
         }
 
+        /// <summary>
+        /// Gets a null variant singleton.
+        /// </summary>
         public static Variant Null => new Variant();
     }
 }

@@ -465,18 +465,36 @@ namespace TinyUa.Core.Transport
         Renew = 1
     }
 
+    /// <summary>
+    /// Parameters for an OpenSecureChannel service request.
+    /// </summary>
     public class OpenSecureChannelParameters
     {
+        /// <summary>Gets or sets whether to issue a new token or renew an existing one.</summary>
         internal SecurityTokenRequestType RequestType { get; set; }
+
+        /// <summary>Gets or sets the requested message security mode.</summary>
         internal MessageSecurityMode SecurityMode { get; set; }
+
+        /// <summary>Gets or sets the client-generated nonce for key derivation.</summary>
         internal byte[] ClientNonce { get; set; }
+
+        /// <summary>Gets or sets the requested lifetime of the security token in milliseconds.</summary>
         internal uint RequestedLifetime { get; set; }
     }
 
+    /// <summary>
+    /// Result returned by an OpenSecureChannel service operation.
+    /// </summary>
     public class OpenSecureChannelResult
     {
+        /// <summary>Gets or sets the server protocol version.</summary>
         internal uint ServerProtocolVersion { get; set; }
+
+        /// <summary>Gets or sets the issued or renewed channel security token.</summary>
         internal ChannelSecurityToken SecurityToken { get; set; } = new ChannelSecurityToken();
+
+        /// <summary>Gets or sets the server-generated nonce used for key derivation.</summary>
         internal byte[]? ServerNonce { get; set; }
     }
 
