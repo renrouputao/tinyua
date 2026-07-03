@@ -91,10 +91,10 @@ public sealed class SecurityIntegrationTests
         Assert.True(refs!.Length > 0, "Browse of Objects (i=85) returned no references.");
 
         // Read Server.ServerStatus.CurrentTime (i=2258) — validates a second MSG round-trip.
-        var dv = await client.ReadAsync(new NodeId(2258));
-        Assert.NotNull(dv);
-        Assert.True(dv!.StatusCode?.IsGood == true,
-            $"Read of i=2258 returned status {dv.StatusCode}");
+        var result = await client.ReadAsync(new NodeId(2258));
+        Assert.NotNull(result);
+        Assert.True(result!.DataValue?.StatusCode?.IsGood == true,
+            $"Read of i=2258 returned status {result.DataValue?.StatusCode}");
 
         _output.WriteLine($"PASS: policy={policy}, identity={identity}, references={refs.Length}");
     }

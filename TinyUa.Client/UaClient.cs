@@ -727,32 +727,35 @@ namespace TinyUa.Core.Client
         }
 
         /// <summary>
-        /// Read a single node value. Includes automatic reconnect and connection-error retry.
+        /// Read a single node value. Returns a <see cref="ReadResult"/> with the NodeId and <see cref="DataValue"/>.
+        /// Includes automatic reconnect and connection-error retry.
         /// </summary>
         /// <param name="nodeId">The node to read.</param>
         /// <param name="attributeId">The attribute to read, default <see cref="AttributeId.Value"/>.</param>
         /// <param name="cancellationToken">Cancellation token.</param>
-        /// <returns>The <see cref="DataValue"/>, or <c>null</c> on connection failure or in <see cref="ErrorMode.ReturnNull"/> mode.</returns>
+        /// <returns>The <see cref="ReadResult"/>, or <c>null</c> on connection failure or in <see cref="ErrorMode.ReturnNull"/> mode.</returns>
         /// <exception cref="ArgumentNullException"><paramref name="nodeId"/> is <c>null</c>.</exception>
         /// <exception cref="UaConnectionException">Reconnect timed out or failed (<see cref="ErrorMode.Throw"/> mode only).</exception>
         /// <exception cref="UaOperationException">Non-connection error (<see cref="ErrorMode.Throw"/> mode only).</exception>
-        public async Task<DataValue?> ReadAsync(NodeId nodeId, AttributeId attributeId = AttributeId.Value, CancellationToken cancellationToken = default)
+        public async Task<ReadResult?> ReadAsync(NodeId nodeId, AttributeId attributeId = AttributeId.Value, CancellationToken cancellationToken = default)
         {
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
             var results = await ExecuteWithRetryAsync("Read", () => _client!.ReadAsync(nodeId, attributeId), cancellationToken).ConfigureAwait(false);
-            return results != null && results.Length > 0 ? results[0] : null;
+            if (results == null || results.Length == 0) return null;
+            return new ReadResult { NodeId = nodeId, DataValue = results[0] };
         }
 
         /// <summary>
         /// Read multiple node values in batch. Includes automatic reconnect and connection-error retry.
+        /// Each <see cref="ReadResult"/> pairs the input NodeId with its returned <see cref="DataValue"/>.
         /// </summary>
         /// <param name="nodeIds">The nodes to read. Must not be empty.</param>
         /// <param name="attributeId">The attribute to read, default <see cref="AttributeId.Value"/>.</param>
         /// <param name="cancellationToken">Cancellation token.</param>
-        /// <returns>Array of results, one per input node.</returns>
+        /// <returns>Array of <see cref="ReadResult"/>, one per input node.</returns>
         /// <exception cref="ArgumentNullException"><paramref name="nodeIds"/> is <c>null</c>.</exception>
         /// <exception cref="ArgumentException"><paramref name="nodeIds"/> is an empty array.</exception>
-        public async Task<DataValue[]?> ReadAsync(NodeId[] nodeIds, AttributeId attributeId = AttributeId.Value, CancellationToken cancellationToken = default)
+        public async Task<ReadResult[]?> ReadAsync(NodeId[] nodeIds, AttributeId attributeId = AttributeId.Value, CancellationToken cancellationToken = default)
         {
             if (nodeIds == null) throw new ArgumentNullException(nameof(nodeIds));
             if (nodeIds.Length == 0) throw new ArgumentException("NodeIds array cannot be empty", nameof(nodeIds));
@@ -769,8 +772,8 @@ namespace TinyUa.Core.Client
         public async Task<T?> ReadValueAsync<T>(NodeId nodeId, CancellationToken cancellationToken = default)
         {
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
-            var results = await ReadAsync(nodeId, AttributeId.Value, cancellationToken).ConfigureAwait(false);
-            return ExtractValue<T>(results);
+            var result = await ReadAsync(nodeId, AttributeId.Value, cancellationToken).ConfigureAwait(false);
+            return ExtractValue<T>(result?.DataValue);
         }
 
         /// <summary>
@@ -783,8 +786,8 @@ namespace TinyUa.Core.Client
         public async Task<T?> ReadValueAsync<T>(NodeId nodeId, AttributeId attributeId, CancellationToken cancellationToken = default)
         {
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
-            var results = await ReadAsync(nodeId, attributeId, cancellationToken).ConfigureAwait(false);
-            return ExtractValue<T>(results);
+            var result = await ReadAsync(nodeId, attributeId, cancellationToken).ConfigureAwait(false);
+            return ExtractValue<T>(result?.DataValue);
         }
 
         private static T? ExtractValue<T>(DataValue? result)
@@ -814,28 +817,29 @@ namespace TinyUa.Core.Client
         }
 
         /// <summary>
-        /// Write a value to a single node. Includes automatic reconnect and connection-error retry.
-        /// The OPC UA type is inferred from the CLR type automatically.
+        /// Write a value to a single node. Returns a <see cref="WriteResult"/> with the NodeId and <see cref="StatusCode"/>.
+        /// Includes automatic reconnect and connection-error retry. The OPC UA type is inferred from the CLR type automatically.
         /// </summary>
         /// <param name="nodeId">The target node.</param>
         /// <param name="value">The value to write (<c>int</c>, <c>double</c>, <c>string</c>, <c>bool</c>, etc.).</param>
         /// <param name="cancellationToken">Cancellation token.</param>
-        /// <returns>The result status code, <see cref="StatusCode.Good"/> on success.</returns>
+        /// <returns>The <see cref="WriteResult"/>, or <c>null</c> on connection failure or in <see cref="ErrorMode.ReturnNull"/> mode.</returns>
         /// <exception cref="ArgumentNullException"><paramref name="nodeId"/> is <c>null</c>.</exception>
-        public async Task<StatusCode?> WriteAsync(NodeId nodeId, object value, CancellationToken cancellationToken = default)
+        public async Task<WriteResult?> WriteAsync(NodeId nodeId, object value, CancellationToken cancellationToken = default)
         {
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
-            var results = await ExecuteWithRetryAsync("Write", () => _client!.WriteAsync(nodeId, value), cancellationToken).ConfigureAwait(false);
+            var results = await WriteAsync(new[] { new WriteValue { NodeId = nodeId, Value = new DataValue(new Variant(value)) } }, cancellationToken).ConfigureAwait(false);
             return results != null && results.Length > 0 ? results[0] : null;
         }
 
         /// <summary>
         /// Write multiple nodes in batch (supports different values and types per node).
+        /// Each <see cref="WriteResult"/> pairs the input NodeId with its returned <see cref="StatusCode"/>.
         /// </summary>
         /// <param name="values">The nodes and values to write.</param>
         /// <param name="cancellationToken">Cancellation token.</param>
-        /// <returns>Array of status codes, one per input.</returns>
-        public async Task<StatusCode[]?> WriteAsync(WriteValue[] values, CancellationToken cancellationToken = default)
+        /// <returns>Array of <see cref="WriteResult"/>, one per input.</returns>
+        public async Task<WriteResult[]?> WriteAsync(WriteValue[] values, CancellationToken cancellationToken = default)
         {
             if (values == null) throw new ArgumentNullException(nameof(values));
             if (values.Length == 0) throw new ArgumentException("WriteValues array cannot be empty", nameof(values));
@@ -848,8 +852,8 @@ namespace TinyUa.Core.Client
         /// <param name="nodeIdString">The NodeId string, e.g. <c>"ns=2;s=SetPoint"</c>.</param>
         /// <param name="value">The value to write.</param>
         /// <param name="cancellationToken">Cancellation token.</param>
-        /// <returns>The result status code.</returns>
-        public Task<StatusCode?> WriteAsync(string nodeIdString, object value, CancellationToken cancellationToken = default)
+        /// <returns>The <see cref="WriteResult"/> with NodeId and <see cref="StatusCode"/>.</returns>
+        public Task<WriteResult?> WriteAsync(string nodeIdString, object value, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrEmpty(nodeIdString))
                 throw new ArgumentException("NodeId string cannot be null or empty", nameof(nodeIdString));

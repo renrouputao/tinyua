@@ -8,7 +8,7 @@
     <RepositoryType>git</RepositoryType>
     <PackageTags>opcua;opc-ua;iiot;industrial-automation</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <Version>1.0.0-preview3</Version>
+    <Version>1.0.0-preview4</Version>
   </PropertyGroup>
 
   <ItemGroup>

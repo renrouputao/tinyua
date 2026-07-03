@@ -209,4 +209,16 @@ namespace TinyUa.Core.Client.Services
             return response;
         }
     }
+
+    /// <summary>
+    /// Represents the result of a single node read in a batch <see cref="UaClient.ReadAsync(NodeId[], AttributeId, CancellationToken)"/> call.
+    /// </summary>
+    public class ReadResult
+    {
+        /// <summary>The NodeId that was read.</summary>
+        public NodeId NodeId { get; init; } = new NodeId();
+
+        /// <summary>The returned data value, or <c>null</c> if the read failed.</summary>
+        public DataValue? DataValue { get; init; }
+    }
 }

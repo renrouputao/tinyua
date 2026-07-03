@@ -137,4 +137,16 @@ namespace TinyUa.Core.Client.Services
             return response;
         }
     }
+
+    /// <summary>
+    /// Represents the result of a single node write in a batch <see cref="UaClient.WriteAsync(WriteValue[], CancellationToken)"/> call.
+    /// </summary>
+    public class WriteResult
+    {
+        /// <summary>The NodeId that was written.</summary>
+        public NodeId NodeId { get; init; } = new NodeId();
+
+        /// <summary>The status code returned by the server for this write.</summary>
+        public StatusCode StatusCode { get; init; }
+    }
 }

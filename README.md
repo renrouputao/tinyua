@@ -130,11 +130,11 @@ await using var client = await UaClient
     .WithUserName("test", "user123")
     .BuildAndRunAsync();
 
-// Read multiple nodes at once
+// Read multiple nodes at once — each result carries its NodeId
 var results = await client.ReadAsync(new NodeId[] { "i=2256", "i=2258" });
 if (results != null)
-    for (int i = 0; i < results.Length; i++)
-        Console.WriteLine($"  [{i}] = {results[i].Value?.Value ?? "(null)"}");
+    foreach (var r in results)
+        Console.WriteLine($"  {r.NodeId} = {r.DataValue?.Value?.Value ?? "(null)"}");
 
 // Subscribe to a value change with a typed callback
 var sub = await client.SubscribeAsync<DateTime>("i=2258", val =>

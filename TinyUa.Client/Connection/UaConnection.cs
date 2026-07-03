@@ -293,7 +293,7 @@ namespace TinyUa.Core.Client.Connection
             return response.Results;
         }
 
-        internal async Task<DataValue[]?> ReadAsync(NodeId[] nodeIds, AttributeId attributeId = AttributeId.Value)
+        internal async Task<ReadResult[]?> ReadAsync(NodeId[] nodeIds, AttributeId attributeId = AttributeId.Value)
         {
             var nodesToRead = new ReadValueId[nodeIds.Length];
             for (int i = 0; i < nodeIds.Length; i++)
@@ -306,16 +306,23 @@ namespace TinyUa.Core.Client.Connection
             };
             var response = await _socket!.SendRequestAsync<ReadRequest, ReadResponse>(request).ConfigureAwait(false);
             response.ResponseHeader.ServiceResult.Check();
-            return response.Results;
+
+            var results = new ReadResult[nodeIds.Length];
+            for (int i = 0; i < nodeIds.Length; i++)
+                results[i] = new ReadResult { NodeId = nodeIds[i], DataValue = response.Results?[i] };
+            return results;
         }
 
-        internal async Task<StatusCode[]?> WriteAsync(NodeId nodeId, DataValue value)
-            => await WriteAsync(new[] { new WriteValue { NodeId = nodeId, Value = value } }).ConfigureAwait(false);
+        internal async Task<StatusCode?> WriteAsync(NodeId nodeId, DataValue value)
+        {
+            var results = await WriteAsync(new[] { new WriteValue { NodeId = nodeId, Value = value } }).ConfigureAwait(false);
+            return results != null && results.Length > 0 ? results[0].StatusCode : null;
+        }
 
-        internal async Task<StatusCode[]?> WriteAsync(NodeId nodeId, object value, VariantType? variantType = null)
+        internal async Task<StatusCode?> WriteAsync(NodeId nodeId, object value, VariantType? variantType = null)
             => await WriteAsync(nodeId, new DataValue(new Variant(value, variantType))).ConfigureAwait(false);
 
-        internal async Task<StatusCode[]?> WriteAsync(WriteValue[] nodesToWrite)
+        internal async Task<WriteResult[]?> WriteAsync(WriteValue[] nodesToWrite)
         {
             var request = new WriteRequest
             {
@@ -324,7 +331,11 @@ namespace TinyUa.Core.Client.Connection
             };
             var response = await _socket!.SendRequestAsync<WriteRequest, WriteResponse>(request).ConfigureAwait(false);
             response.ResponseHeader.ServiceResult.Check();
-            return response.Results;
+
+            var results = new WriteResult[nodesToWrite.Length];
+            for (int i = 0; i < nodesToWrite.Length; i++)
+                results[i] = new WriteResult { NodeId = nodesToWrite[i].NodeId, StatusCode = response.Results?[i] ?? StatusCode.Bad };
+            return results;
         }
 
         internal async Task<TResponse> SendRequestAsync<TRequest, TResponse>(TRequest request, byte[]? messageType = null)

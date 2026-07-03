@@ -59,7 +59,7 @@ class Program
             .BuildAndRunAsync();
 
         Console.WriteLine($"  Connected: {client.IsConnected}, Session: {client.SessionId}");
-
+        
         var time = await client.ReadValueAsync<DateTime>("i=2258");
         Console.WriteLine($"  ServerTime: {time:HH:mm:ss.fff}");
         Console.WriteLine();
@@ -115,7 +115,7 @@ class Program
         var results = await client.ReadAsync(new NodeId[] { "i=2256", "i=2258" });
         if (results != null)
             for (int i = 0; i < results.Length; i++)
-                Console.WriteLine($"  [{i}] = {results[i].Value?.Value ?? "(null)"}");
+                Console.WriteLine($"  [{i}] = {results[i].DataValue?.Value?.Value ?? "(null)"}");
         Console.WriteLine();
     }
 
