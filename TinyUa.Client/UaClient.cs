@@ -1178,7 +1178,7 @@ namespace TinyUa.Core.Client
             var nodeId = NodeId.Parse(nodeIdString);
             await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
             var sub = await GetOrCreateDefaultSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
-            DataChangeHandler handler = (handle, value, status) =>
+            DataChangeHandler handler = (_, value, status) =>
             {
                 if (status.IsGood && value is T typed)
                     onDataChanged(typed);
@@ -1209,7 +1209,7 @@ namespace TinyUa.Core.Client
             var nodeId = NodeId.Parse(nodeIdString);
             await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
             var sub = await GetOrCreateDefaultSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
-            DataChangeHandler handler = (handle, value, status) =>
+            DataChangeHandler handler = (_, value, status) =>
             {
                 if (status.IsGood && value is T typed)
                     onDataChanged(typed, status);

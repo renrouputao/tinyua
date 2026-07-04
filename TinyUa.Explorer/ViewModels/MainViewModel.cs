@@ -470,7 +470,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
             var nodeId = node.NodeId;
             var (sub, monitoredItemId) = await _client.SubscribeAsync(
                 nodeId,
-                (clientHandle, value, status) =>
+                (_, value, status) =>
                 {
                     _syncContext.Post(_ =>
                     {
@@ -508,7 +508,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
             var nodeId = NodeId.Parse(row.NodeId);
             var (sub, monitoredItemId) = await _client.SubscribeAsync(
                 nodeId,
-                (clientHandle, value, status) =>
+                (_, value, status) =>
                 {
                     _syncContext.Post(_ =>
                     {

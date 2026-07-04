@@ -155,6 +155,50 @@ foreach (var r in writeResults)
 }
 ```
 
+```csharp
+using TinyUa.Core.Client;
+using TinyUa.Core.Client.Subscriptions;
+
+// Subscribe — typed callback (single node)
+var sub = await client.SubscribeAsync<DateTime>("i=2258", val =>
+{
+    Console.WriteLine($"ServerTime: {val:HH:mm:ss.fff}");
+}, interval: 500);
+
+await Task.Delay(3000);
+sub.Dispose();
+```
+
+```csharp
+// Subscribe — batch with NodeId in callback
+var sub = await client.SubscribeAsync(
+    new NodeId[] { "i=2258", "ns=2;s=Demo.Dynamic.Scalar.Double" },
+    (nodeId, value, status) =>
+    {
+        if (status.IsGood)
+            Console.WriteLine($"{nodeId}: {value}");
+    },
+    interval: 500);
+
+await Task.Delay(3000);
+sub.Dispose();
+```
+
+```csharp
+// Browse — get child references from the Objects folder
+var results = await client.BrowseAsync("i=85");
+foreach (var desc in results[0].References)
+    Console.WriteLine($"  {desc.DisplayName?.Text} ({desc.NodeClass}): {desc.NodeId}");
+
+// BrowseNext — continue if there are more results
+if (results[0].ContinuationPoint != null)
+{
+    var next = await client.BrowseNextAsync(results[0].ContinuationPoint);
+    foreach (var desc in next[0].References)
+        Console.WriteLine($"  {desc.DisplayName?.Text}: {desc.NodeId}");
+}
+```
+
 ## Project Structure
 
 | Project | Type | Description |

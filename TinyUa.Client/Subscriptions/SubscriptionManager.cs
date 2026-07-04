@@ -11,12 +11,12 @@ using TinyUa.Core.Client.Services;
 namespace TinyUa.Core.Client.Subscriptions
 {
     /// <summary>
-    /// Represents a callback that is invoked when a monitored item value changes.
+    /// Callback for data change notifications. Receives the source <see cref="NodeId"/>, the new value, and the quality status.
     /// </summary>
-    /// <param name="clientHandle">The client-assigned handle that identifies the monitored item.</param>
-    /// <param name="value">The new value reported by the server, or null if no value is available.</param>
-    /// <param name="status">The status code associated with the data change.</param>
-    public delegate void DataChangeHandler(uint clientHandle, object? value, StatusCode status);
+    /// <param name="nodeId">The NodeId of the monitored item that changed.</param>
+    /// <param name="value">The new value, or null.</param>
+    /// <param name="status">The quality status code.</param>
+    public delegate void DataChangeHandler(NodeId nodeId, object? value, StatusCode status);
 
     internal static class SubscriptionManager
     {
@@ -81,7 +81,7 @@ namespace TinyUa.Core.Client.Subscriptions
         internal Dictionary<uint, MonitoredItem> MonitoredItems { get; } = new();
         private int _nextClientHandle = 0;
 
-        internal event Action<uint, object?, StatusCode>? OnDataChange;
+        internal event Action<NodeId, object?, StatusCode>? OnDataChange;
 
         internal event Action? OnKeepAlive;
 
@@ -379,10 +379,10 @@ namespace TinyUa.Core.Client.Subscriptions
                 item.LastStatus = capturedStatus;
             }
 
-            try { item.OnDataChange?.Invoke(clientHandle, capturedValue, capturedStatus); }
+            try { item.OnDataChange?.Invoke(item.NodeId, capturedValue, capturedStatus); }
             catch (Exception ex) { _logger?.LogWarning(ex, $"Subscription {SubscriptionId}: OnDataChange handler threw"); }
 
-            try { OnDataChange?.Invoke(clientHandle, capturedValue, capturedStatus); }
+            try { OnDataChange?.Invoke(item.NodeId, capturedValue, capturedStatus); }
             catch (Exception ex) { _logger?.LogWarning(ex, $"Subscription {SubscriptionId}: OnDataChange event handler threw"); }
         }
 
