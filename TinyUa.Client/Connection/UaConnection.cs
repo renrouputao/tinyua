@@ -309,7 +309,15 @@ namespace TinyUa.Core.Client.Connection
 
             var results = new ReadResult[nodeIds.Length];
             for (int i = 0; i < nodeIds.Length; i++)
-                results[i] = new ReadResult { NodeId = nodeIds[i], DataValue = response.Results?[i] };
+            {
+                var dv = response.Results?[i];
+                results[i] = new ReadResult
+                {
+                    NodeId = nodeIds[i],
+                    StatusCode = dv?.StatusCode ?? StatusCode.Bad,
+                    DataValue = dv,
+                };
+            }
             return results;
         }
 

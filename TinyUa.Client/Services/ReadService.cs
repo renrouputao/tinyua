@@ -218,6 +218,9 @@ namespace TinyUa.Core.Client.Services
         /// <summary>The NodeId that was read.</summary>
         public NodeId NodeId { get; init; } = new NodeId();
 
+        /// <summary>The status code for this read. Always present, even if <see cref="DataValue"/> is null.</summary>
+        public StatusCode StatusCode { get; init; } = StatusCode.Bad;
+
         /// <summary>The returned data value, or <c>null</c> if the read failed.</summary>
         public DataValue? DataValue { get; init; }
     }

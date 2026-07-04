@@ -107,6 +107,9 @@ namespace TinyUa.Core.Types
         /// <param name="type">Optional explicit OPC UA type. If null, the type is guessed from the CLR type.</param>
         public Variant(object? value, VariantType? type = null)
         {
+            if (type != null && value != null)
+                value = ConvertToTargetType(value, type.Value);
+
             Value = value;
             VariantType = type ?? GuessType(value);
             IsArray = value is Array && value.GetType() != typeof(byte[]);
@@ -120,6 +123,27 @@ namespace TinyUa.Core.Types
                 }
                 Dimensions = dims.Length > 1 ? dims : null;
             }
+        }
+
+        private static object ConvertToTargetType(object value, VariantType targetType)
+        {
+            return targetType switch
+            {
+                VariantType.Boolean => Convert.ToBoolean(value),
+                VariantType.SByte => Convert.ToSByte(value),
+                VariantType.Byte => Convert.ToByte(value),
+                VariantType.Int16 => Convert.ToInt16(value),
+                VariantType.UInt16 => Convert.ToUInt16(value),
+                VariantType.Int32 => Convert.ToInt32(value),
+                VariantType.UInt32 => Convert.ToUInt32(value),
+                VariantType.Int64 => Convert.ToInt64(value),
+                VariantType.UInt64 => Convert.ToUInt64(value),
+                VariantType.Float => Convert.ToSingle(value),
+                VariantType.Double => Convert.ToDouble(value),
+                VariantType.String => Convert.ToString(value)!,
+                VariantType.DateTime => Convert.ToDateTime(value),
+                _ => value   // complex types (NodeId, etc.) are already the correct CLR type
+            };
         }
 
         /// <summary>

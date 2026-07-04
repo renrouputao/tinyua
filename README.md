@@ -90,60 +90,69 @@ This starts an in-process OPC UA server and runs the client against it — no ex
 ```csharp
 using TinyUa.Core.Client;
 
-// No security (anonymous, no encryption)
+// Connect (no security, anonymous)
 await using var client = await UaClient
     .ConnectTo("opc.tcp://myserver:4840")
     .WithAppName("MyApp")
     .BuildAndRunAsync();
 
-// Read a single value
+// Simple read
 var time = await client.ReadValueAsync<DateTime>("i=2258");
 Console.WriteLine($"ServerTime: {time:HH:mm:ss.fff}");
-```
 
-```csharp
-// Encrypted channel + anonymous (no user credentials)
-await using var client = await UaClient
-    .ConnectTo("opc.tcp://myserver:4840")
-    .WithAppName("MyApp")
-    .WithSecurity("Basic256Sha256")
-    .BuildAndRunAsync();
-
-// Browse the Objects folder
-var nodes = await client.BrowseAsync("i=85");
-Console.WriteLine($"  Objects folder: {nodes?.Length ?? 0} children");
-
-// Read Server.ServerStatus.CurrentTime
-var time = await client.ReadValueAsync<DateTime>("i=2258");
-Console.WriteLine($"  ServerTime: {time:HH:mm:ss.fff}");
+// Simple write
+var status = await client.WriteAsync("ns=2;s=Demo.Static.Scalar.Double", 3.14);
+Console.WriteLine(status?.StatusCode.IsGood == true ? "OK" : $"Failed: {status?.StatusCode.GetStatusText()}");
 ```
 
 ```csharp
 using TinyUa.Core.Client;
 using TinyUa.Core.Types;
 
-// Encrypted channel + username/password authentication
+// Connect with security + username
 await using var client = await UaClient
     .ConnectTo("opc.tcp://myserver:4840")
     .WithAppName("MyApp")
-    .WithSecurity("Aes128_Sha256_RsaOaep")
+    .WithSecurity("Basic256Sha256")
     .WithUserName("test", "user123")
     .BuildAndRunAsync();
 
-// Read multiple nodes at once — each result carries its NodeId
+// Batch read — each result carries its NodeId, StatusCode, and DataValue
 var results = await client.ReadAsync(new NodeId[] { "i=2256", "i=2258" });
-if (results != null)
-    foreach (var r in results)
-        Console.WriteLine($"  {r.NodeId} = {r.DataValue?.Value?.Value ?? "(null)"}");
-
-// Subscribe to a value change with a typed callback
-var sub = await client.SubscribeAsync<DateTime>("i=2258", val =>
+foreach (var r in results)
 {
-    Console.WriteLine($"Tick: {val:HH:mm:ss.fff}");
-}, interval: 500);
+    if (r.StatusCode.IsGood)
+        Console.WriteLine($"  {r.NodeId} = {r.DataValue?.Value?.Value}");
+    else
+        Console.WriteLine($"  {r.NodeId}: {r.StatusCode.GetStatusText()}");
+}
+```
 
-await Task.Delay(3000);
-sub.Dispose();
+```csharp
+using TinyUa.Core.Client;
+using TinyUa.Core.Client.Services;
+using TinyUa.Core.Types;
+
+// Batch write — each result carries its NodeId and StatusCode
+await using var client = await UaClient
+    .ConnectTo("opc.tcp://myserver:4840")
+    .WithAppName("MyApp")
+    .WithSecurity("Basic256Sha256")
+    .BuildAndRunAsync();
+
+var writeResults = await client.WriteAsync(new WriteValue[]
+{
+    new() { NodeId = "ns=2;s=Demo.Static.Scalar.Double", Value = new DataValue(3.14) },
+    new() { NodeId = "ns=2;s=Demo.Static.Scalar.Float",  Value = new DataValue(2.718f) },
+    new() { NodeId = "ns=2;s=Demo.Static.Scalar.Int32",  Value = new DataValue(42) },
+});
+foreach (var r in writeResults)
+{
+    if (r.StatusCode.IsGood)
+        Console.WriteLine($"  {r.NodeId}: OK");
+    else
+        Console.WriteLine($"  {r.NodeId}: {r.StatusCode.GetStatusText()}");
+}
 ```
 
 ## Project Structure

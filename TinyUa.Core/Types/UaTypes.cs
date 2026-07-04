@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using TinyUa.Core.Binary;
 
 namespace TinyUa.Core.Types
@@ -105,9 +106,65 @@ namespace TinyUa.Core.Types
         }
 
         /// <summary>
+        /// Returns a human-readable status text like "Good", "BadNodeIdUnknown", etc.
+        /// For unrecognized codes, returns the hex value with severity prefix.
+        /// </summary>
+        public readonly string GetStatusText()
+        {
+            // Mask to top 16 bits (the status code family) to match regardless of info bits.
+            var family = Value & 0xFFFF0000;
+            if (FamilyToName.TryGetValue(family, out var name))
+                return name;
+            if (IsGood)
+                return $"Good (0x{Value:X8})";
+            if (IsBad)
+                return $"Bad (0x{Value:X8})";
+            return $"Uncertain (0x{Value:X8})";
+        }
+
+        private static readonly Dictionary<uint, string> FamilyToName = new()
+        {
+            [0x00000000] = "Good",
+            [0x40000000] = "Uncertain",
+            [0x80000000] = "Bad",
+            [0x80010000] = "BadUnexpectedError",
+            [0x80060000] = "BadEncodingError",
+            [0x80070000] = "BadDecodingError",
+            [0x80080000] = "BadEncodingLimitsExceeded",
+            [0x801F0000] = "BadUserAccessDenied",
+            [0x80320000] = "BadWaitingForInitialData",
+            [0x80330000] = "BadNodeIdInvalid",
+            [0x80340000] = "BadNodeIdUnknown",
+            [0x80350000] = "BadAttributeIdInvalid",
+            [0x80360000] = "BadIndexRangeInvalid",
+            [0x80370000] = "BadIndexRangeNoData",
+            [0x80380000] = "BadDataEncodingInvalid",
+            [0x80390000] = "BadDataEncodingUnsupported",
+            [0x803A0000] = "BadNotReadable",
+            [0x803B0000] = "BadNotWritable",
+            [0x803D0000] = "BadNotSupported",
+            [0x80400000] = "BadNotImplemented",
+            [0x80460000] = "BadStructureMissing",
+            [0x80600000] = "BadBrowseNameInvalid",
+            [0x80730000] = "BadWriteNotSupported",
+            [0x80740000] = "BadTypeMismatch",
+            [0x80760000] = "BadArgumentsMissing",
+            [0x80890000] = "BadConfigurationError",
+            [0x80AB0000] = "BadInvalidArgument",
+            [0x80B60000] = "BadSyntaxError",
+            [0x80E50000] = "BadTooManyArguments",
+            [0x81110000] = "BadNotExecutable",
+        };
+
+        /// <summary>
         /// A Good status code (0x00000000).
         /// </summary>
         public static StatusCode Good => new StatusCode(0);
+
+        /// <summary>
+        /// An Uncertain status code (0x40000000).
+        /// </summary>
+        public static StatusCode Uncertain => new StatusCode(0x40000000);
 
         /// <summary>
         /// A generic Bad status code (0x80000000).

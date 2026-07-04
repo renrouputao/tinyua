@@ -742,7 +742,8 @@ namespace TinyUa.Core.Client
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
             var results = await ExecuteWithRetryAsync("Read", () => _client!.ReadAsync(nodeId, attributeId), cancellationToken).ConfigureAwait(false);
             if (results == null || results.Length == 0) return null;
-            return new ReadResult { NodeId = nodeId, DataValue = results[0] };
+            var dv = results[0];
+            return new ReadResult { NodeId = nodeId, StatusCode = dv?.StatusCode ?? StatusCode.Bad, DataValue = dv };
         }
 
         /// <summary>

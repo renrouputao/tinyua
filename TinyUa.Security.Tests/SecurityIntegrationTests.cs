@@ -93,8 +93,8 @@ public sealed class SecurityIntegrationTests
         // Read Server.ServerStatus.CurrentTime (i=2258) — validates a second MSG round-trip.
         var result = await client.ReadAsync(new NodeId(2258));
         Assert.NotNull(result);
-        Assert.True(result!.DataValue?.StatusCode?.IsGood == true,
-            $"Read of i=2258 returned status {result.DataValue?.StatusCode}");
+        Assert.True(result!.StatusCode.IsGood,
+            $"Read of i=2258 returned {result.StatusCode.GetStatusText()}");
 
         _output.WriteLine($"PASS: policy={policy}, identity={identity}, references={refs.Length}");
     }
