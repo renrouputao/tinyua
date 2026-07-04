@@ -51,9 +51,19 @@ namespace TinyUa.Core.Client.Connection
             template.ActiveSubscription = activeSubscription;
             lock (_lock)
             {
-
-                _subscriptionTemplates.RemoveAll(t => t.SubscriptionId == template.SubscriptionId);
-                _subscriptionTemplates.Add(template);
+                var existing = _subscriptionTemplates.Find(t => t.SubscriptionId == template.SubscriptionId);
+                if (existing != null)
+                {
+                    foreach (var item in template.Items)
+                    {
+                        if (!existing.Items.Any(i => i.NodeId == item.NodeId))
+                            existing.Items.Add(item);
+                    }
+                }
+                else
+                {
+                    _subscriptionTemplates.Add(template);
+                }
             }
         }
 
