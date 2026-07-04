@@ -15,45 +15,166 @@ dotnet run --project TinyUa.Example -- selftest
 
 Minimal code:
 ```csharp
-var client = await UaClient.ConnectTo("opc.tcp://server:4840")
+using TinyUa.Core.Client;
+
+await using var client = await UaClient
+    .ConnectTo("opc.tcp://server:4840")
+    .WithAppName("MyApp")
     .WithSecurity("Basic256Sha256")
     .WithUserName("user", "pass")
     .BuildAndRunAsync();
 
-var value = await client.ReadAsync("ns=2;s=Temperature");
-Console.WriteLine(value);
+// Simple typed read
+var time = await client.ReadValueAsync<DateTime>("i=2258");
+Console.WriteLine($"ServerTime: {time:HH:mm:ss.fff}");
+
+// Simple write
+var result = await client.WriteAsync("ns=2;s=SetPoint", 42.0);
+Console.WriteLine(result.StatusCode.IsGood ? "OK" : result.StatusCode.GetStatusText());
 ```
 
 ## API
 
-**Fluent Builder:**
-- `UaClient.ConnectTo(url)` — start builder
-- `.WithSecurity("Basic256Sha256")` — set security policy (short name)
-- `.WithSecurityMode(MessageSecurityMode.SignAndEncrypt)`
-- `.WithUserName(user, pass)` — username/password authentication
+### Connection & Configuration
+
+**Fluent Builder** (`UaClient.ConnectTo(url)`):
+- `.WithSecurity("Basic256Sha256")` — set security policy (None / Basic256Sha256 / Aes128Sha256RsaOaep / Aes256Sha256RsaPss)
+- `.WithUserName(user, pass)` — username/password authentication (password is RSA-OAEP encrypted)
 - `.WithAppName("MyApp")` — set application name
-- `.EnableLog(ILogger)` / `.EnableLogFile(path)` — logging
-- `.BuildAndRunAsync()` — connect and create session
+- `.WithRequestTimeout(5000)` — per-step network timeout in ms (default 30000)
+- `.WithSessionTimeout(ms)` — session lifetime (default 3600000)
+- `.WithReconnectRetries(max)` — max reconnect attempts (default -1 = infinite)
+- `.WithoutReconnect()` — disable auto-reconnect
+- `.WithErrorMode(ErrorMode.ReturnNull)` — return null on error instead of throwing
+- `.EnableLog((level, ex, msg) => ...)` — console logging via delegate
+- `.EnableLogFile("./logs", LogLevel.Debug, async: true)` — file logging
+- `.WithLogger(ILogger)` — custom logger
+- `.Build()` — create client without connecting
+- `.BuildAndRunAsync()` — create + connect + full handshake
 
-**Services:**
-- `ReadAsync(nodeId)` — read a single node value
-- `ReadAsync(nodeId[])` — **batch read** multiple nodes in one request (much faster for many variables)
-- `ReadValueAsync<T>(nodeId)` — typed single-node read (returns `T`)
-- `WriteAsync(nodeId, value)` — write a single node value
-- `WriteAsync(WriteValue[])` — **batch write** multiple values in one request (much faster for many variables)
-- `BrowseAsync(nodeId)` — browse children
-- `BrowseNextAsync(continuationPoint)` — continue browse
-- `CreateSubscriptionAsync(interval)` — create subscription, returns IDisposable
+**Configuration** (`UaClientOptions`):
+- `Timeount` — per-step network timeout in ms (default 30000)
+- `SessionTimeout` / `ChannelLifetime` — session/channel lifetime in ms
+- `ReconnectMaxRetries` — default -1 (infinite), 0 disables reconnect
+- `ReconnectInitialDelayMs` / `ReconnectMaxDelayMs` — exponential backoff params
+- `ErrorMode` — Throw (default) or ReturnNull
+- `Security.Policy` / `Security.Mode` — security policy and message mode
+- `Security.AutoDiscoverServerCertificate` / `AutoAcceptServerCertificate` — auto-discovery and auto-trust
+- `Security.UserIdentity.Type` — Anonymous, UserName, Certificate
+- `Security.Certificate.AutoGenerate` / `KeySize` / `ValidityYears` — client cert options
 
-**Configuration (`UaClientOptions`):**
-- `Security.Policy` — "None", "Basic256Sha256", "Aes128Sha256RsaOaep", "Aes256Sha256RsaPss"
-- `Security.Mode` — None, Sign, SignAndEncrypt
-- `Security.UserIdentity` — Anonymous, UserName, X509 certificate
-- `Security.Certificate.AutoDiscoverServerCertificate` — auto-discover server cert via GetEndpoints
-- `Security.Certificate.AutoAcceptServerCertificate` — auto-trust server cert
-- `ReconnectMaxRetries` / `ReconnectInitialDelayMs` / `ReconnectMaxDelayMs` — exponential backoff
-- `Timeout` — request timeout in ms
-- `ErrorMode` — Throw or ReturnNull on error
+### Read
+
+```csharp
+// Single node — returns ReadResult { NodeId, StatusCode, DataValue? }
+var r = await client.ReadAsync("i=2258");
+if (r.StatusCode.IsGood)
+    Console.WriteLine($"{r.NodeId}: {r.DataValue?.Value?.Value}");
+
+// Batch — returns ReadResult[]
+var results = await client.ReadAsync(new NodeId[] { "i=2256", "i=2258" });
+foreach (var r in results)
+{
+    if (r.StatusCode.IsGood)
+        Console.WriteLine($"{r.NodeId}: {r.DataValue?.Value?.Value}");
+    else
+        Console.WriteLine($"{r.NodeId}: {r.StatusCode.GetStatusText()}");
+}
+
+// Typed single-node helper — returns T?
+var time = await client.ReadValueAsync<DateTime>("i=2258");
+var temp = await client.ReadValueAsync<double>("ns=2;s=Temperature");
+```
+
+`ReadResult` properties: `NodeId`, `StatusCode` (non-nullable), `DataValue?`
+
+`ReadValueAsync<T>` returns `T?` directly — casts via `Convert.ChangeType`. Returns `default(T)` on failure or type mismatch.
+
+### Write
+
+```csharp
+// Single node — returns WriteResult { NodeId, StatusCode }
+var r = await client.WriteAsync("ns=2;s=SetPoint", 42.0);
+Console.WriteLine(r.StatusCode.IsGood ? "OK" : r.StatusCode.GetStatusText());
+
+// Batch — returns WriteResult[]
+var results = await client.WriteAsync(new WriteValue[]
+{
+    new() { NodeId = "ns=2;s=Scalar.Double", Value = new DataValue(3.14) },
+    new() { NodeId = "ns=2;s=Scalar.Float",  Value = new DataValue(2.718f) },
+    new() { NodeId = "ns=2;s=Scalar.Int32",  Value = new DataValue(42) },
+});
+foreach (var r in results)
+    Console.WriteLine($"{r.NodeId}: {(r.StatusCode.IsGood ? "OK" : r.StatusCode.GetStatusText())}");
+
+// Write without checking result
+await client.WriteValueAsync<double>("ns=2;s=SetPoint", 42.0);
+```
+
+`WriteResult` properties: `NodeId`, `StatusCode` (non-nullable)
+
+`DataValue` constructor: `new DataValue(object)` auto-detects type, or `new DataValue(new Variant(value, VariantType.Float))` for explicit type conversion.
+
+### Browse
+
+```csharp
+var results = await client.BrowseAsync("i=85");  // Objects folder
+foreach (var desc in results[0].References)
+    Console.WriteLine($"{desc.DisplayName?.Text} ({desc.NodeClass}): {desc.NodeId}");
+
+// BrowseNext — continue when ContinuationPoint is present
+if (results[0].ContinuationPoint != null)
+{
+    var next = await client.BrowseNextAsync(results[0].ContinuationPoint);
+    foreach (var desc in next[0].References)
+        Console.WriteLine($"{desc.DisplayName?.Text}: {desc.NodeId}");
+}
+```
+
+### Subscribe
+
+```csharp
+// Typed single-node subscription
+var sub = await client.SubscribeAsync<DateTime>("i=2258", val =>
+{
+    Console.WriteLine($"ServerTime: {val:HH:mm:ss.fff}");
+}, interval: 500);
+
+// Batch subscription — NodeId in callback
+var sub = await client.SubscribeAsync(
+    new NodeId[] { "i=2258", "ns=2;s=Temperature" },
+    (nodeId, value, status) =>
+    {
+        if (status.IsGood)
+            Console.WriteLine($"{nodeId}: {value}");
+    },
+    interval: 500);
+
+sub.Dispose();  // unsubscribe
+```
+
+`DataChangeHandler` delegate: `(NodeId nodeId, object? value, StatusCode status)`
+Subscriptions auto-recover on reconnect. Multiple `SubscribeAsync` calls with the same interval share one subscription.
+
+### StatusCode
+
+```csharp
+status.IsGood / status.IsBad / status.IsUncertain   // bool properties
+status.GetStatusText()  // "Good", "BadNodeIdUnknown", "BadNotWritable", etc.
+                        // Falls back to "Bad (0xNNNNNNNN)" for unrecognized codes
+```
+
+Predefined status codes (30 total): `StatusCode.Good`, `StatusCode.Bad`, `StatusCode.BadNodeIdUnknown`, `StatusCode.BadAttributeIdInvalid`, `StatusCode.BadUserAccessDenied`, `StatusCode.BadNotWritable`, `StatusCode.BadTypeMismatch`, etc.
+
+### Endpoint Discovery
+
+```csharp
+var endpoints = await EndpointDiscoverer.DiscoverAsync("opc.tcp://server:4840");
+foreach (var ep in endpoints)
+    Console.WriteLine($"{ep.SecurityPolicy} ({ep.SecurityMode}): {ep.EndpointUrl}");
+```
+
+`DiscoveredEndpoint` properties: `EndpointUrl`, `SecurityPolicy` (short name), `SecurityPolicyUri`, `SecurityMode`, `SecurityLevel`, `UserTokenTypes`, `IsSecure`
 
 ## Security
 

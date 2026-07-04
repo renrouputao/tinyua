@@ -31,18 +31,25 @@ The OPCF SDK (`OPCFoundation.NetStandard.Opc.Ua` v1.5.374.126) is used ONLY in E
 
 - [TinyUa.Client/UaClient.cs](TinyUa.Client/UaClient.cs) — Main client entry point, `ClientState` enum, `ClientBuilder` with Fluent API
 - [TinyUa.Client/UaClientOptions.cs](TinyUa.Client/UaClientOptions.cs) — All configuration: `SecurityOptions`, `UserIdentityOptions`, `CertificateOptions`, reconnect, timeout
+- [TinyUa.Client/Services/ReadService.cs](TinyUa.Client/Services/ReadService.cs) — `ReadResult` class, `ReadValueId`, `ReadRequest`/`ReadResponse`
+- [TinyUa.Client/Services/WriteService.cs](TinyUa.Client/Services/WriteService.cs) — `WriteResult` class, `WriteValue`, `WriteRequest`/`WriteResponse`
+- [TinyUa.Client/Subscriptions/SubscriptionManager.cs](TinyUa.Client/Subscriptions/SubscriptionManager.cs) — `DataChangeHandler` delegate, `Subscription`, `MonitoredItem`
 - [TinyUa.Core/Security/SecurityPolicyFactory.cs](TinyUa.Core/Security/SecurityPolicyFactory.cs) — Creates security policies from string names
 - [TinyUa.Core/Security/SecurityPolicy.cs](TinyUa.Core/Security/SecurityPolicy.cs) — `MessageSecurityMode` enum (public), `SecurityPolicy` abstract class (internal)
+- [TinyUa.Core/Types/UaTypes.cs](TinyUa.Core/Types/UaTypes.cs) — `StatusCode` struct with `IsGood`/`IsBad`/`GetStatusText()`, `DataValue`, `QualifiedName`, `LocalizedText`
 - [TinyUa.Transport/MessageChunk.cs](TinyUa.Transport/MessageChunk.cs) — OPC UA Part 6 message chunking: sign-then-encrypt / verify-before-decrypt pipeline
 - [TinyUa.Transport/SecureConnection.cs](TinyUa.Transport/SecureConnection.cs) — Secure channel with token rotation state machine
-- [TinyUa.Core/Types/Variant.cs](TinyUa.Core/Types/Variant.cs) — OPC UA variant type system with `GuessType()` inference
+- [TinyUa.Core/Types/Variant.cs](TinyUa.Core/Types/Variant.cs) — OPC UA variant type system with `GuessType()` inference and `ConvertToTargetType()` for explicit casts
 - [TinyUa.Example/Program.cs](TinyUa.Example/Program.cs) — Runnable examples and self-test entry point
 
 ## Engineering Conventions
 
-- **InternalsVisibleTo chain**: Core → Transport → Client → {Tests, Benchmarks}
+- **InternalsVisibleTo chain**: Core → Transport → Client → {Tests, Benchmarks}. Explorer has NO InternalsVisibleTo — uses only public APIs.
 - **Nullability**: enabled project-wide; `ImplicitUsings` enabled in Core/Client, disabled in Transport
-- **Variant type inference**: Use `Variant.GuessType()` to infer UA type from CLR type — do not construct Variant with raw type IDs directly
+- **Variant type inference**: Use `Variant.GuessType()` for auto-detection. When `Variant(value, VariantType.XYZ)` is called with an explicit type, `ConvertToTargetType()` converts the value via `Convert.To*()` (e.g. `double` → `float` for `VariantType.Float`) — no more InvalidCastException.
+- **Read/Write results**: Single `ReadAsync(nodeId)` returns `ReadResult?`, batch returns `ReadResult[]?`. Single `WriteAsync(nodeId, val)` returns `WriteResult?`, batch `WriteAsync(WriteValue[])` returns `WriteResult[]?`. Both result types carry `NodeId` + `StatusCode` (non-nullable). `ReadResult` also has `DataValue?`.
+- **StatusCode**: Always use `r.StatusCode.IsGood` (not `r.DataValue?.StatusCode?.IsGood`). Use `StatusCode.GetStatusText()` for human-readable names like "BadNodeIdUnknown".
+- **DataChangeHandler**: Signature is `(NodeId nodeId, object? value, StatusCode status)` — no more `clientHandle` parameter.
 - **Security policy names**: Use short names in `SecurityOptions.Policy` — "None", "Basic256Sha256", "Aes128Sha256RsaOaep", "Aes256Sha256RsaPss"
 - **Certificate discovery**: `UaClient` auto-discovers server certificate via GetEndpoints service on connect (controlled by `AutoDiscoverServerCertificate`)
 - **OPN vs MSG**: OpenSecureChannel (OPN) messages always use SignAndEncrypt; regular MSG messages use the configured `MessageSecurityMode`
@@ -66,8 +73,8 @@ The OPCF SDK (`OPCFoundation.NetStandard.Opc.Ua` v1.5.374.126) is used ONLY in E
 | `TinyUa.Core.Client` | Client (UaClient, ClientBuilder, UaClientOptions) |
 | `TinyUa.Core.Client.Connection` | Client (UaConnection, UaSocketClient, ReconnectEngine) |
 | `TinyUa.Core.Client.Discovery` | Client (EndpointDiscoverer, DiscoveredEndpoint) |
-| `TinyUa.Core.Client.Services` | Client (Read/Write/Browse/Session/Subscription services) |
-| `TinyUa.Core.Client.Subscriptions` | Client (SubscriptionManager, SubscriptionRouter) |
+| `TinyUa.Core.Client.Services` | Client (ReadResult, WriteResult, Read/Write/Browse/Session/Subscription services) |
+| `TinyUa.Core.Client.Subscriptions` | Client (DataChangeHandler, Subscription, MonitoredItem, SubscriptionManager, SubscriptionRouter) |
 
 ## Testing
 
