@@ -234,6 +234,7 @@ namespace TinyUa.Core.Client
             X509Certificate2? remoteCert = null;
             var resolvedMode = security.Mode;
             string? userNamePolicyId = null;
+            EndpointDescription? selected = null;
 
             if (isSecure && security.AutoDiscoverServerCertificate)
             {
@@ -243,7 +244,7 @@ namespace TinyUa.Core.Client
                     ("endpointCount", endpoints?.Length ?? 0),
                     ("requestedPolicy", security.Policy),
                     ("requestedMode", security.Mode));
-                var selected = SelectEndpoint(endpoints, security.Policy, security.Mode);
+                selected = SelectEndpoint(endpoints, security.Policy, security.Mode);
                 if (selected == null)
                     throw new UaException(0x80000000,
                         $"No server endpoint matches policy '{security.Policy}' with mode '{security.Mode}'.");
@@ -268,8 +269,11 @@ namespace TinyUa.Core.Client
             var policy = SecurityPolicyFactory.Create(security.Policy, localCert, remoteCert, resolvedMode);
             _client.SetSecurityPolicy(policy);
 
+            // Use discovered endpoint URL if available, otherwise user-provided
+            var effectiveUrl = selected?.EndpointUrl ?? endpointUrl;
+
             await _client.ConnectAsync(host, port).ConfigureAwait(false);
-            await _client.SendHelloAsync(endpointUrl, _options.MaxMessageSize).ConfigureAwait(false);
+            await _client.SendHelloAsync(effectiveUrl, _options.MaxMessageSize).ConfigureAwait(false);
 
             var clientNonce = new byte[policy.NonceLength];
             if (clientNonce.Length > 0)
@@ -283,7 +287,7 @@ namespace TinyUa.Core.Client
                 RequestedLifetime = _options.ChannelLifetime
             }).ConfigureAwait(false);
 
-            var createResponse = await _client.CreateSessionAsync(endpointUrl, _options.ApplicationName,
+            var createResponse = await _client.CreateSessionAsync(effectiveUrl, _options.ApplicationName,
                 _options.ApplicationUri, _options.ProductUri, (uint)_options.SessionTimeout).ConfigureAwait(false);
 
             SecurityDebugLogger.LogStage("Connect.CreateSession",
@@ -334,17 +338,51 @@ namespace TinyUa.Core.Client
             await Task.CompletedTask;
         }
 
+        private static string? GetUriFromCertificate(X509Certificate2 cert)
+        {
+            try
+            {
+                // SAN OID = 2.5.29.17
+                var sanExt = cert.Extensions["2.5.29.17"];
+                if (sanExt == null) return null;
+                var s = sanExt.Format(false);
+                // Format is "URL=uri, DNS Name=host"
+                foreach (var part in s.Split(','))
+                {
+                    var trimmed = part.Trim();
+                    if (trimmed.StartsWith("URL=", StringComparison.OrdinalIgnoreCase))
+                        return trimmed.Substring(4);
+                }
+            }
+            catch { }
+            return null;
+        }
+
         private X509Certificate2? LoadOrGenerateCertificate(CertificateOptions certOptions)
         {
-            if (!string.IsNullOrEmpty(certOptions.CertificatePath))
+            // Try loading from file first
+            if (!string.IsNullOrEmpty(certOptions.CertificatePath) && File.Exists(certOptions.CertificatePath))
             {
+                X509Certificate2 cert;
                 if (!string.IsNullOrEmpty(certOptions.PrivateKeyPath))
                 {
-                    var (cert, _) = CertificateLoader.LoadCertificateWithKey(
+                    (cert, _) = CertificateLoader.LoadCertificateWithKey(
                         certOptions.CertificatePath!, certOptions.PrivateKeyPath!);
-                    return cert;
                 }
-                return CertificateLoader.LoadCertificate(certOptions.CertificatePath!);
+                else
+                {
+                    cert = CertificateLoader.LoadCertificate(certOptions.CertificatePath!, certOptions.PrivateKeyPassword);
+                }
+
+                // Sync ApplicationUri to match the loaded certificate's URI SAN
+                var certUri = GetUriFromCertificate(cert);
+                if (certUri != null && _options.ApplicationUri != certUri)
+                {
+                    _logger.LogDebug($"Syncing ApplicationUri to cert URI: {certUri}");
+                    _options.ApplicationUri = certUri;
+                }
+
+                return cert;
             }
 
             if (certOptions.AutoGenerate)
@@ -356,6 +394,21 @@ namespace TinyUa.Core.Client
                     _options.ApplicationUri,
                     certOptions.KeySize,
                     certOptions.ValidityYears);
+
+                // Save to file if path is specified
+                if (!string.IsNullOrEmpty(certOptions.CertificatePath))
+                {
+                    var pfxPassword = certOptions.PrivateKeyPassword ?? "";
+                    var pfxBytes = string.IsNullOrEmpty(pfxPassword)
+                        ? cert.Export(X509ContentType.Pfx)
+                        : cert.Export(X509ContentType.Pfx, pfxPassword);
+                    File.WriteAllBytes(certOptions.CertificatePath, pfxBytes);
+
+                    // Also save DER format for servers that don't accept PFX
+                    var derPath = Path.ChangeExtension(certOptions.CertificatePath, ".der");
+                    File.WriteAllBytes(derPath, cert.RawData);
+                }
+
                 return cert;
             }
 

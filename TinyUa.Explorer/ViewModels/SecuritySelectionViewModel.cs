@@ -20,7 +20,10 @@ namespace TinyUa.Explorer.ViewModels
         MessageSecurityMode Mode,
         UserTokenType TokenType,
         string? Username,
-        string? Password);
+        string? Password,
+        string? CertificatePath = null,
+        string? PrivateKeyPassword = null,
+        bool AutoGenerateCert = true);
 
     /// <summary>
     /// View-model for the endpoint security discovery/selection dialog. On construction it
@@ -140,6 +143,8 @@ namespace TinyUa.Explorer.ViewModels
                     {
                         Username = _saved.Username ?? "";
                         Password = _saved.PlainPassword ?? "";
+                        CertificatePath = _saved.CertificatePath;
+                        CertPrivateKeyPassword = _saved.PrivateKeyPassword;
                     }
                 }
             }
@@ -202,6 +207,14 @@ namespace TinyUa.Explorer.ViewModels
         /// <summary>Raised by Ok/Cancel to ask the view to close itself.</summary>
         public event Action? RequestClose;
 
+        /// <summary>Path to a PFX certificate file for secure connections. Leave empty for auto-generate.</summary>
+        [ObservableProperty]
+        private string? _certificatePath;
+
+        /// <summary>Password for the PFX certificate file, if any.</summary>
+        [ObservableProperty]
+        private string? _certPrivateKeyPassword;
+
         /// <summary>Builds the result from the current selection. Call only when
         /// <see cref="DialogResult"/> is true.</summary>
         public SecuritySelectionResult ToResult() => new(
@@ -209,6 +222,9 @@ namespace TinyUa.Explorer.ViewModels
             Mode: SelectedEndpoint!.SecurityMode,
             TokenType: SelectedTokenType,
             Username: NeedsCredentials ? Username : null,
-            Password: NeedsCredentials ? Password : null);
+            Password: NeedsCredentials ? Password : null,
+            CertificatePath: CertificatePath,
+            PrivateKeyPassword: CertPrivateKeyPassword,
+            AutoGenerateCert: string.IsNullOrEmpty(CertificatePath));
     }
 }

@@ -50,6 +50,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CanEditEndpoint))]
+    [NotifyCanExecuteChangedFor(nameof(ConnectCommand))]
+    [NotifyCanExecuteChangedFor(nameof(DisconnectCommand))]
     [NotifyCanExecuteChangedFor(nameof(SecurityCommand))]
     private bool _isConnected;
 
@@ -113,6 +115,11 @@ public partial class MainViewModel : ObservableObject, IDisposable
         {
             StatusText = "Connection cancelled";
         }
+        catch (IOException) when (_connectCts?.IsCancellationRequested == true)
+        {
+            // socket was interrupted by disconnect — not a real error
+            StatusText = "Connection cancelled";
+        }
         catch (Exception ex)
         {
             StatusText = $"Connect failed: {ex.Message}";
@@ -142,7 +149,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
             TokenType = result.TokenType,
             Username = result.Username,
             EncryptedPasswordBase64 = SecuritySettingsStore.EncryptPassword(result.Password),
-            PlainPassword = result.Password
+            PlainPassword = result.Password,
+            CertificatePath = result.CertificatePath,
+            PrivateKeyPassword = result.PrivateKeyPassword,
+            AutoGenerateCert = result.AutoGenerateCert
         };
         _securityStore.Save(EndpointUrl, _currentSecurity);
         RefreshSecuritySummary();
@@ -159,6 +169,12 @@ public partial class MainViewModel : ObservableObject, IDisposable
             Type = s.TokenType,
             Username = s.Username,
             Password = s.PlainPassword
+        },
+        Certificate = new CertificateOptions
+        {
+            CertificatePath = s.CertificatePath,
+            PrivateKeyPassword = s.PrivateKeyPassword,
+            AutoGenerate = s.AutoGenerateCert
         }
     };
 
@@ -183,7 +199,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     partial void OnEndpointUrlChanged(string value)
     {
-        ApplySavedSecurityIfAny();
+        if (!IsConnecting && !IsConnected)
+            ApplySavedSecurityIfAny();
     }
 
     [RelayCommand(CanExecute = nameof(CanDisconnect))]
@@ -670,10 +687,26 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private void AddToEndpointHistory(string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return;
-        EndpointHistory.Remove(url);
-        EndpointHistory.Insert(0, url);
-        if (EndpointHistory.Count > 20)
+
+        // If URL is already first in list, don't touch the collection
+        if (EndpointHistory.Count > 0 && EndpointHistory[0] == url)
+            return;
+
+        // Remove then insert-at-top — but do it atomically for ObservableCollection
+        int existingIdx = -1;
+        for (int i = 0; i < EndpointHistory.Count; i++)
+        {
+            if (EndpointHistory[i] == url) { existingIdx = i; break; }
+        }
+
+        if (existingIdx >= 0)
+            EndpointHistory.Move(existingIdx, 0);
+        else
+            EndpointHistory.Insert(0, url);
+
+        while (EndpointHistory.Count > 20)
             EndpointHistory.RemoveAt(EndpointHistory.Count - 1);
+
         SaveEndpointHistory();
     }
 

@@ -6,17 +6,19 @@ namespace TinyUa.Core.Security.Certificates
 {
     internal static class CertificateLoader
     {
-        internal static X509Certificate2 LoadCertificate(string path)
+        internal static X509Certificate2 LoadCertificate(string path, string? password = null)
         {
             var bytes = File.ReadAllBytes(path);
-            return LoadCertificate(bytes);
+            return LoadCertificate(bytes, password);
         }
 
-        internal static X509Certificate2 LoadCertificate(byte[] data)
+        internal static X509Certificate2 LoadCertificate(byte[] data, string? password = null)
         {
             if (data.Length > 5 && data[0] == 0x2D)
                 return X509Certificate2.CreateFromPem(Encoding.ASCII.GetString(data));
-            return new X509Certificate2(data);
+            return password != null
+                ? new X509Certificate2(data, password)
+                : new X509Certificate2(data);
         }
 
         internal static RSA LoadPrivateKey(string path)

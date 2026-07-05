@@ -31,6 +31,12 @@ namespace TinyUa.Explorer.Views
                     _vm.Password = PwdBox.Password;
             };
 
+            CertPwdBox.PasswordChanged += (_, _) =>
+            {
+                if (_vm.CertPrivateKeyPassword != CertPwdBox.Password)
+                    _vm.CertPrivateKeyPassword = CertPwdBox.Password;
+            };
+
             vm.RequestClose += () => Close();
         }
 

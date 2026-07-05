@@ -4,7 +4,7 @@
                  xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
                  xmlns:conv="clr-namespace:TinyUa.Explorer.Converters"
                  Title="Security Settings"
-                 Width="560" Height="560"
+                 Width="560" Height="700"
                  WindowStartupLocation="CenterOwner"
                  ResizeMode="NoResize"
                  ExtendsContentIntoTitleBar="False">
@@ -73,6 +73,17 @@
                              Padding="6,4"
                              Margin="0,0,0,6" />
             </StackPanel>
+
+            <!-- Certificate configuration (optional, for secure connections) -->
+            <ui:TextBlock FontTypography="BodyStrong" Text="Client Certificate" Margin="0,12,0,6" />
+            <ui:TextBox Text="{Binding CertificatePath, UpdateSourceTrigger=PropertyChanged}"
+                        PlaceholderText="PFX certificate path (leave empty to auto-generate)"
+                        Margin="0,0,0,6" />
+            <PasswordBox x:Name="CertPwdBox"
+                         PasswordChar="•"
+                         Padding="6,4"
+                         Margin="0,0,0,6"
+                         ToolTip="PFX private key password (optional)" />
 
             <!-- None + UserName warning -->
             <ui:TextBlock Visibility="{Binding IsNoneWithUserName, Converter={StaticResource BooleanToVisibilityConverter}}"

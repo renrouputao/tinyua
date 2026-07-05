@@ -307,8 +307,10 @@ namespace TinyUa.Core.Client.Services
         {
             ClientSignature.Encode(encoder);
 
+            // clientSoftwareCertificates — not used, encode as null array
             encoder.WriteInt32(-1);
 
+            // localeIds — Kepware requires this before UserIdentityToken
             encoder.WriteInt32(1);
             encoder.WriteString("en");
 
@@ -317,7 +319,7 @@ namespace TinyUa.Core.Client.Services
                 NodeIdCodec.Encode(encoder, new NodeId(321, 0));
                 encoder.WriteByte(1);
                 var bodyEncoder = new BinaryEncoder();
-                bodyEncoder.WriteString("open");
+                bodyEncoder.WriteString(UserIdentity?.PolicyId);
                 encoder.WriteByteString(bodyEncoder.ToByteArray());
             }
             else if (UserIdentity.TokenType == UserTokenType.UserName)

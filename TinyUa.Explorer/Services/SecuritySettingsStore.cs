@@ -22,6 +22,11 @@ namespace TinyUa.Explorer.Services
         public string? Username { get; init; }
         public string? EncryptedPasswordBase64 { get; init; }
 
+        // Certificate options
+        public string? CertificatePath { get; init; }
+        public string? PrivateKeyPassword { get; init; }
+        public bool AutoGenerateCert { get; init; } = true;
+
         /// <summary>Decrypted password (in-memory only). Never serialized — marked
         /// <see cref="JsonIgnoreAttribute"/> so it can never leak to disk.</summary>
         [JsonIgnore]
