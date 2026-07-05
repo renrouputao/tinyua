@@ -107,6 +107,31 @@ Console.WriteLine(status?.StatusCode.IsGood == true ? "OK" : $"Failed: {status?.
 
 ```csharp
 using TinyUa.Core.Client;
+using TinyUa.Core.Security;
+
+// Connect with security + fixed certificate
+// First run: auto-generates cert if it doesn't exist (saves .pfx + .der)
+// Import the .der into the server's Trusted Client list
+await using var client = await UaClient
+    .ConnectTo("opc.tcp://myserver:4840")
+    .WithSecurity("Basic256Sha256")
+    .WithSecurity(opts =>
+    {
+        opts.Certificate = new CertificateOptions
+        {
+            CertificatePath = @"D:\Certs\myclient.pfx",
+            PrivateKeyPassword = "mypassword",   // optional
+            AutoGenerate = false                  // create 
+        };
+    })
+    .BuildAndRunAsync();
+
+var time = await client.ReadValueAsync<DateTime>("i=2258");
+Console.WriteLine($"ServerTime: {time:HH:mm:ss.fff}");
+```
+
+```csharp
+using TinyUa.Core.Client;
 using TinyUa.Core.Types;
 
 // Connect with security + username

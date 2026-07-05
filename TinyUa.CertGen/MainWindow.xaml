@@ -1,0 +1,103 @@
+<Window x:Class="TinyUa.CertGen.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="TinyUa Certificate Generator"
+        Width="520" Height="480"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="TinyUa Client Certificate Generator" FontWeight="Bold" FontSize="16" Margin="0,0,0,16"/>
+
+        <!-- Common Name -->
+        <Grid Grid.Row="1" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="140"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Common Name (CN):" VerticalAlignment="Center"/>
+            <TextBox Grid.Column="1" Text="{Binding CommonName, UpdateSourceTrigger=PropertyChanged}"/>
+        </Grid>
+
+        <!-- URI SAN -->
+        <Grid Grid.Row="2" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="140"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Application URI:" VerticalAlignment="Center"/>
+            <TextBox Grid.Column="1" Text="{Binding ApplicationUri, UpdateSourceTrigger=PropertyChanged}"/>
+        </Grid>
+
+        <!-- Key Size -->
+        <Grid Grid.Row="3" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="140"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Key Size:" VerticalAlignment="Center"/>
+            <ComboBox Grid.Column="1" ItemsSource="{Binding KeySizes}" SelectedItem="{Binding SelectedKeySize}"/>
+        </Grid>
+
+        <!-- Validity -->
+        <Grid Grid.Row="4" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="140"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Validity (years):" VerticalAlignment="Center"/>
+            <TextBox Grid.Column="1" Text="{Binding ValidityYears, UpdateSourceTrigger=PropertyChanged}"/>
+        </Grid>
+
+        <!-- Output Dir -->
+        <Grid Grid.Row="5" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="140"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="Output Directory:" VerticalAlignment="Center"/>
+            <TextBox Grid.Column="1" Text="{Binding OutputDirectory, UpdateSourceTrigger=PropertyChanged}"/>
+            <Button Grid.Column="2" Content="..." Width="30" Margin="4,0,0,0" Click="BrowseOutputDir"/>
+        </Grid>
+
+        <!-- Password -->
+        <Grid Grid.Row="6" Margin="0,0,0,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="140"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="PFX Password:" VerticalAlignment="Center"/>
+            <PasswordBox Grid.Column="1" x:Name="PfxPasswordBox" PasswordChar="•"/>
+        </Grid>
+
+        <!-- Generate -->
+        <Button Grid.Row="7" Content="Generate Certificate"
+                Height="36" FontSize="14"
+                Click="Generate_Click"
+                IsEnabled="{Binding IsNotGenerating}"
+                Margin="0,8,0,12"/>
+
+        <!-- Result -->
+        <Border Grid.Row="8" BorderBrush="LightGray" BorderThickness="1" Padding="8">
+            <TextBox Text="{Binding ResultText, Mode=OneWay}"
+                     IsReadOnly="True"
+                     TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto"
+                     FontFamily="Consolas"
+                     FontSize="12"
+                     Background="#F5F5F5"/>
+        </Border>
+    </Grid>
+</Window>
