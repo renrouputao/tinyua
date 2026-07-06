@@ -1,5 +1,5 @@
 using CommunityToolkit.Mvvm.ComponentModel;
-using TinyUa.Core.Client.Subscriptions;
+using TinyUa.Client.Subscriptions;
 
 namespace TinyUa.Explorer.ViewModels;
 

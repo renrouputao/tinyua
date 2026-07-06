@@ -1,8 +1,9 @@
+using TinyUa.Core;
 using System;
 using TinyUa.Core.Binary;
 using TinyUa.Core.Types;
 
-namespace TinyUa.Core.Client.Services
+namespace TinyUa.Client.Services
 {
     /// <summary>
     /// Specifies a single node, attribute, and value to write in a Write service request.

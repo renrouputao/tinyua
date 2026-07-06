@@ -7,7 +7,7 @@ using TinyUa.Core.Binary;
 using TinyUa.Core.Logging;
 using TinyUa.Core.Security;
 using TinyUa.Core.Security.Certificates;
-using TinyUa.Core.Transport;
+using TinyUa.Transport;
 using TinyUa.Core.Types;
 using Xunit;
 using Xunit.Abstractions;

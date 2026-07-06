@@ -1,9 +1,10 @@
+using TinyUa.Core;
 using System;
 using TinyUa.Core.Binary;
 using TinyUa.Core.Types;
-using TinyUa.Core.Client.Services;
+using TinyUa.Client.Services;
 
-namespace TinyUa.Core.Client
+namespace TinyUa.Client
 {
     /// <summary>
     /// Provides convenience extension methods for the <see cref="BinaryDecoder"/> class.

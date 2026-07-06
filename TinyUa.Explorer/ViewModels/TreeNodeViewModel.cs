@@ -3,9 +3,9 @@ using System.Threading.Tasks;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using TinyUa.Core.Client;
+using TinyUa.Client;
 using TinyUa.Core.Types;
-using TinyUa.Core.Client.Services;
+using TinyUa.Client.Services;
 using System.Linq;
 using System.Collections.Generic;
 

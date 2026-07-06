@@ -1,9 +1,10 @@
+using TinyUa.Core;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
 using TinyUa.Core.Logging;
 
-namespace TinyUa.Core.Client.Connection
+namespace TinyUa.Client.Connection
 {
 
     internal class KeepAliveManager : IDisposable

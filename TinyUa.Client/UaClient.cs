@@ -1,3 +1,4 @@
+using TinyUa.Core;
 using System;
 using System.Linq;
 using System.Security.Cryptography;
@@ -6,14 +7,14 @@ using System.Threading;
 using System.Threading.Tasks;
 using TinyUa.Core.Logging;
 using TinyUa.Core.Types;
-using TinyUa.Core.Transport;
-using TinyUa.Core.Client.Services;
-using TinyUa.Core.Client.Connection;
-using TinyUa.Core.Client.Subscriptions;
+using TinyUa.Transport;
+using TinyUa.Client.Services;
+using TinyUa.Client.Connection;
+using TinyUa.Client.Subscriptions;
 using TinyUa.Core.Security;
 using TinyUa.Core.Security.Certificates;
 
-namespace TinyUa.Core.Client
+namespace TinyUa.Client
 {
     /// <summary>Client connection state.</summary>
     public enum ClientState

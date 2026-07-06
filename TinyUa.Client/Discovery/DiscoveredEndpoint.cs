@@ -1,8 +1,9 @@
+using TinyUa.Core;
 using System;
 using System.Collections.Generic;
 using TinyUa.Core.Security;
 
-namespace TinyUa.Core.Client.Discovery
+namespace TinyUa.Client.Discovery
 {
     /// <summary>
     /// Represents an OPC UA endpoint discovered from a server's GetEndpoints response.

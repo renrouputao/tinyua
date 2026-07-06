@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using System.Threading.Tasks;
-using TinyUa.Core.Client;
+using TinyUa.Client;
 using TinyUa.Core.Logging;
 using TinyUa.Core.Security;
 using TinyUa.Core.Types;

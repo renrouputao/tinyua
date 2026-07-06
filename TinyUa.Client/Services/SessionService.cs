@@ -1,8 +1,9 @@
+using TinyUa.Core;
 using TinyUa.Core.Binary;
 using TinyUa.Core.Types;
 using TinyUa.Core.Security;
 
-namespace TinyUa.Core.Client.Services
+namespace TinyUa.Client.Services
 {
     /// <summary>
     /// Defines the type of OPC UA application.

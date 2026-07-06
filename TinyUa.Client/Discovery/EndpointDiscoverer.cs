@@ -1,14 +1,15 @@
+using TinyUa.Core;
 using System;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using TinyUa.Core.Client.Connection;
-using TinyUa.Core.Client.Services;
+using TinyUa.Client.Connection;
+using TinyUa.Client.Services;
 using TinyUa.Core.Logging;
 using TinyUa.Core.Security;
-using TinyUa.Core.Transport;
+using TinyUa.Transport;
 
-namespace TinyUa.Core.Client.Discovery
+namespace TinyUa.Client.Discovery
 {
     /// <summary>
     /// Provides a fast, connection-oriented mechanism to discover available OPC UA endpoints

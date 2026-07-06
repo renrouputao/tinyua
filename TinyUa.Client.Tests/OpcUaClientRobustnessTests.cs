@@ -1,6 +1,6 @@
-using TinyUa.Core.Client;
-using TinyUa.Core.Client.Services;
-using TinyUa.Core.Client.Subscriptions;
+using TinyUa.Client;
+using TinyUa.Client.Services;
+using TinyUa.Client.Subscriptions;
 using TinyUa.Core.Types;
 
 namespace TinyUa.Client.Tests;

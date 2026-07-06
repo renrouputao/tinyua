@@ -1,9 +1,10 @@
+using TinyUa.Core;
 using System;
 using System.Collections.Generic;
 using TinyUa.Core.Binary;
 using TinyUa.Core.Types;
 
-namespace TinyUa.Core.Client.Services
+namespace TinyUa.Client.Services
 {
     /// <summary>
     /// Represents an acknowledgement of a notification received for a subscription.

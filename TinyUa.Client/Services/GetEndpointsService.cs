@@ -1,3 +1,4 @@
+using TinyUa.Core;
 using System;
 using System.Security.Cryptography.X509Certificates;
 using TinyUa.Core.Binary;
@@ -5,7 +6,7 @@ using TinyUa.Core.Logging;
 using TinyUa.Core.Security;
 using TinyUa.Core.Types;
 
-namespace TinyUa.Core.Client.Services
+namespace TinyUa.Client.Services
 {
     /// <summary>
     /// Describes a user token policy supported by an endpoint.

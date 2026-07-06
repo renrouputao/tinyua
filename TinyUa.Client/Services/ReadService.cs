@@ -1,8 +1,9 @@
+using TinyUa.Core;
 using System;
 using TinyUa.Core.Binary;
 using TinyUa.Core.Types;
 
-namespace TinyUa.Core.Client.Services
+namespace TinyUa.Client.Services
 {
     /// <summary>
     /// Enumerates the OPC UA node attributes that can be read or written.

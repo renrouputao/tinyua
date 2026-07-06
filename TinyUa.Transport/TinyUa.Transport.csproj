@@ -4,7 +4,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <RootNamespace>TinyUa.Core.Transport</RootNamespace>
+    <RootNamespace>TinyUa.Transport</RootNamespace>
     <AssemblyName>TinyUa.Transport</AssemblyName>
     <Description>OPC UA Transport Layer - Message Chunking and Secure Connection</Description>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>

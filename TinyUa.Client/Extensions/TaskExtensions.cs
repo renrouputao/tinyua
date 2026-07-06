@@ -1,9 +1,10 @@
+using TinyUa.Core;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
 using TinyUa.Core.Logging;
 
-namespace TinyUa.Core.Client
+namespace TinyUa.Client
 {
     /// <summary>
     /// Provides extension methods for <see cref="Task"/> and <see cref="Task{TResult}"/> instances.

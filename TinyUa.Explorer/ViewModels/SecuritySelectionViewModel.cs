@@ -4,7 +4,7 @@ using System.Collections.ObjectModel;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using TinyUa.Core.Client.Discovery;
+using TinyUa.Client.Discovery;
 using TinyUa.Core.Security;
 using TinyUa.Explorer.Services;
 

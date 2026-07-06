@@ -1,7 +1,8 @@
+using TinyUa.Core;
 using TinyUa.Core.Binary;
 using TinyUa.Core.Types;
 
-namespace TinyUa.Core.Client.Services
+namespace TinyUa.Client.Services
 {
     /// <summary>
     /// Represents the CloseSecureChannel service request used to close an active secure channel.

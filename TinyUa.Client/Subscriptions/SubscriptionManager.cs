@@ -1,3 +1,4 @@
+using TinyUa.Core;
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -5,10 +6,10 @@ using System.Threading.Tasks;
 using TinyUa.Core.Logging;
 using TinyUa.Core.Binary;
 using TinyUa.Core.Types;
-using TinyUa.Core.Client.Connection;
-using TinyUa.Core.Client.Services;
+using TinyUa.Client.Connection;
+using TinyUa.Client.Services;
 
-namespace TinyUa.Core.Client.Subscriptions
+namespace TinyUa.Client.Subscriptions
 {
     /// <summary>
     /// Callback for data change notifications. Receives the source <see cref="NodeId"/>, the new value, and the quality status.

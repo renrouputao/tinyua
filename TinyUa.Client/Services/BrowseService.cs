@@ -1,8 +1,9 @@
+using TinyUa.Core;
 using System;
 using TinyUa.Core.Binary;
 using TinyUa.Core.Types;
 
-namespace TinyUa.Core.Client.Services
+namespace TinyUa.Client.Services
 {
     /// <summary>
     /// Specifies the direction of a browse operation in the OPC UA address space.

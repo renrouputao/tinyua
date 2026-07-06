@@ -1,3 +1,4 @@
+using TinyUa.Core;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
@@ -7,12 +8,12 @@ using System.Threading.Tasks;
 using TinyUa.Core.Logging;
 using TinyUa.Core.Binary;
 using TinyUa.Core.Security;
-using TinyUa.Core.Transport;
+using TinyUa.Transport;
 using TinyUa.Core.Types;
-using TinyUa.Core.Client.Services;
-using TinyUa.Core.Client.Subscriptions;
+using TinyUa.Client.Services;
+using TinyUa.Client.Subscriptions;
 
-namespace TinyUa.Core.Client.Connection
+namespace TinyUa.Client.Connection
 {
     internal class UaSocketClient : IDisposable
     {

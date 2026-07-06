@@ -3,7 +3,7 @@ using System.Security.Cryptography.X509Certificates;
 using Opc.Ua;
 using Opc.Ua.Configuration;
 using Opc.Ua.Server;
-using TinyUa.Core.Client;
+using TinyUa.Client;
 using NodeId = TinyUa.Core.Types.NodeId;
 
 namespace OpcUa.Example;

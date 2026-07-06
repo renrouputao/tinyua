@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using TinyUa.Core.Client;
+using TinyUa.Client;
 using UaNodeId = TinyUa.Core.Types.NodeId;
 
 namespace TinyUa.Benchmarks;

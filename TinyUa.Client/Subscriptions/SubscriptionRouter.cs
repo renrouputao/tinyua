@@ -1,11 +1,12 @@
+using TinyUa.Core;
 using System;
 using System.Collections.Concurrent;
 using System.Threading.Tasks;
 using TinyUa.Core.Types;
-using TinyUa.Core.Client.Connection;
-using TinyUa.Core.Client.Services;
+using TinyUa.Client.Connection;
+using TinyUa.Client.Services;
 
-namespace TinyUa.Core.Client.Subscriptions
+namespace TinyUa.Client.Subscriptions
 {
 
     internal class SubscriptionRouter

@@ -1,3 +1,4 @@
+using TinyUa.Core;
 using System;
 using System.Security.Cryptography;
 using System.Threading.Tasks;
@@ -5,11 +6,11 @@ using TinyUa.Core.Logging;
 using TinyUa.Core.Binary;
 using TinyUa.Core.Security;
 using TinyUa.Core.Security.Certificates;
-using TinyUa.Core.Transport;
+using TinyUa.Transport;
 using TinyUa.Core.Types;
-using TinyUa.Core.Client.Services;
+using TinyUa.Client.Services;
 
-namespace TinyUa.Core.Client.Connection
+namespace TinyUa.Client.Connection
 {
 
     internal class UaConnection : IDisposable

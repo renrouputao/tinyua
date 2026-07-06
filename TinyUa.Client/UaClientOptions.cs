@@ -1,6 +1,7 @@
+using TinyUa.Core;
 using TinyUa.Core.Security;
 
-namespace TinyUa.Core.Client
+namespace TinyUa.Client
 {
     /// <summary>
     /// Defines how the client handles operation failures.

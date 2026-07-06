@@ -7,7 +7,7 @@ using TinyUa.Core.Logging;
 using TinyUa.Core.Security;
 using TinyUa.Core.Types;
 
-namespace TinyUa.Core.Transport
+namespace TinyUa.Transport
 {
     internal class ChannelSecurityToken
     {

@@ -1,15 +1,16 @@
+using TinyUa.Core;
 using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using TinyUa.Core.Logging;
 using TinyUa.Core.Types;
-using TinyUa.Core.Client.Services;
-using TinyUa.Core.Client.Subscriptions;
-using TinyUa.Core.Transport;
+using TinyUa.Client.Services;
+using TinyUa.Client.Subscriptions;
+using TinyUa.Transport;
 using TinyUa.Core.Security;
 
-namespace TinyUa.Core.Client.Connection
+namespace TinyUa.Client.Connection
 {
 
     internal class ReconnectEngine : IDisposable

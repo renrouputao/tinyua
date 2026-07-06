@@ -4,7 +4,7 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <RootNamespace>TinyUa.Core.Client</RootNamespace>
+    <RootNamespace>TinyUa.Client</RootNamespace>
     <AssemblyName>TinyUa.Client</AssemblyName>
     <Description>OPC UA Client Library</Description>
     <GeneratePackageOnBuild>True</GeneratePackageOnBuild>

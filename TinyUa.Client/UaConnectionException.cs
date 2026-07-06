@@ -1,6 +1,7 @@
+using TinyUa.Core;
 using System;
 
-namespace TinyUa.Core.Client
+namespace TinyUa.Client
 {
     /// <summary>
     /// Represents errors that occur during UA connection operations.

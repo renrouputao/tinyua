@@ -1,9 +1,10 @@
+using TinyUa.Core;
 using System;
 using TinyUa.Core.Binary;
-using TinyUa.Core.Transport;
+using TinyUa.Transport;
 using TinyUa.Core.Types;
 
-namespace TinyUa.Core.Client.Services
+namespace TinyUa.Client.Services
 {
     /// <summary>
     /// Represents the OPC UA service request header that is included in every service request.
