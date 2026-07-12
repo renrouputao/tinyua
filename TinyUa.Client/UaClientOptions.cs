@@ -41,6 +41,17 @@ namespace TinyUa.Client
         /// <summary>Session lifetime in milliseconds. The server will close the session after this expires. Default 3600000 (1 hour).</summary>
         public double SessionTimeout { get; set; } = 3600000;
 
+        /// <summary>
+        /// Idle threshold in milliseconds for the session keep-alive heartbeat. The heartbeat —
+        /// a lightweight read of <c>Server.ServerStatus.State</c> (i=2259) — is only sent when
+        /// no request has gone out for this long; ordinary reads/writes/publish requests already
+        /// refresh the session lifetime, so under continuous traffic no heartbeat is sent at all.
+        /// When the session stays idle, this value becomes the heartbeat interval.
+        /// 0 (default) = automatic: a quarter of <see cref="SessionTimeout"/>, clamped to
+        /// [1000, 60000] ms. A negative value disables the heartbeat.
+        /// </summary>
+        public int SessionKeepAliveIntervalMs { get; set; } = 0;
+
         /// <summary>Secure channel lifetime in milliseconds. The channel is automatically renewed before expiry. Default 3600000 (1 hour).</summary>
         public uint ChannelLifetime { get; set; } = 3600000;
 
@@ -83,6 +94,7 @@ namespace TinyUa.Client
             ProductUri = ProductUri,
             Timeout = Timeout,
             SessionTimeout = SessionTimeout,
+            SessionKeepAliveIntervalMs = SessionKeepAliveIntervalMs,
             ChannelLifetime = ChannelLifetime,
             MaxMessageSize = MaxMessageSize,
             ErrorMode = ErrorMode,

@@ -30,7 +30,10 @@ namespace TinyUa.Client.Connection
         internal NodeId? AuthenticationToken => _authenticationToken;
         internal uint RevisedChannelLifetime => _socket?.RevisedChannelLifetime ?? 3600000;
 
-        internal bool IsAlive => _socket?.IsAlive ?? false;
+            internal bool IsAlive => _socket?.IsAlive ?? false;
+
+        /// <summary>Milliseconds since the last request was sent, or <see cref="long.MaxValue"/> when not connected.</summary>
+        internal long IdleMilliseconds => _socket?.IdleMilliseconds ?? long.MaxValue;
 
         internal event Action<Exception?>? ConnectionLost;
 

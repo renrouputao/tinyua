@@ -334,7 +334,8 @@ namespace TinyUa.Client
         private void StartKeepAlive()
         {
             StopAndDisposeKeepAlive();
-            _keepAliveManager = new KeepAliveManager(_client, (int)_options.SessionTimeout, (int)_options.ChannelLifetime, _logger);
+            _keepAliveManager = new KeepAliveManager(_client, (int)_options.SessionTimeout, (int)_options.ChannelLifetime,
+                _logger, _options.SessionKeepAliveIntervalMs);
             _keepAliveManager.Start();
         }
 

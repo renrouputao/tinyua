@@ -36,6 +36,7 @@ namespace TinyUa.Client.Connection
         private volatile bool _dead;
         private uint _requestId;
         private uint _revisedChannelLifetime;
+        private long _lastRequestTicks = Environment.TickCount64;
 
         private readonly byte[] _headerBuffer = new byte[8];
         private readonly byte[] _channelIdBuffer = new byte[4];
@@ -57,6 +58,15 @@ namespace TinyUa.Client.Connection
         }
 
         internal bool IsSecureChannelOpen => _connection.IsOpen;
+
+        /// <summary>
+        /// Milliseconds since the last request was written to the wire. Session lifetime is
+        /// refreshed by every request the server receives, so this is the reference point for
+        /// idle-gated session keep-alive.
+        /// </summary>
+        internal long IdleMilliseconds => Environment.TickCount64 - Volatile.Read(ref _lastRequestTicks);
+
+        private void MarkRequestSent() => Volatile.Write(ref _lastRequestTicks, Environment.TickCount64);
 
         internal bool IsAlive => Volatile.Read(ref _running) && _receiveTask != null && !_receiveTask.IsCompleted;
 
@@ -323,6 +333,7 @@ namespace TinyUa.Client.Connection
                 _callbacks[requestId] = tcs;
 
                 await _stream!.WriteAsync(message, 0, message.Length, cancellationToken).ConfigureAwait(false);
+                MarkRequestSent();
             }
             catch
             {
@@ -393,6 +404,7 @@ namespace TinyUa.Client.Connection
                 _callbacks[requestId] = tcs;
 
                 await _stream!.WriteAsync(message, 0, message.Length).ConfigureAwait(false);
+                MarkRequestSent();
             }
             catch (Exception)
             {
@@ -476,6 +488,7 @@ namespace TinyUa.Client.Connection
 
                 message = _connection.MessageToBinary(encodedBody, messageType, (uint)requestId);
                 await _stream!.WriteAsync(message, 0, message.Length).ConfigureAwait(false);
+                MarkRequestSent();
             }
             catch
             {
