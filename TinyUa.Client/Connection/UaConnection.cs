@@ -100,7 +100,7 @@ namespace TinyUa.Client.Connection
         internal async Task<OpenSecureChannelResult> OpenSecureChannelAsync(OpenSecureChannelParameters parameters)
             => await _socket!.OpenSecureChannelAsync(parameters).ConfigureAwait(false);
 
-        internal async Task<OpenSecureChannelResult> RenewSecureChannelAsync()
+        internal async Task<OpenSecureChannelResult> RenewSecureChannelAsync(uint requestedLifetime = 3600000)
         {
             var nonce = new byte[_securityPolicy.NonceLength];
             if (nonce.Length > 0)
@@ -111,7 +111,7 @@ namespace TinyUa.Client.Connection
                 RequestType = SecurityTokenRequestType.Renew,
                 SecurityMode = _securityPolicy.SecurityMode,
                 ClientNonce = nonce.Length > 0 ? nonce : null,
-                RequestedLifetime = 3600000
+                RequestedLifetime = requestedLifetime
             };
             return await OpenSecureChannelAsync(parameters).ConfigureAwait(false);
         }

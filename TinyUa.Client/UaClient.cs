@@ -234,7 +234,7 @@ namespace TinyUa.Client
 
             X509Certificate2? remoteCert = null;
             var resolvedMode = security.Mode;
-            string? userNamePolicyId = null;
+            string? userTokenPolicyId = null;
             EndpointDescription? selected = null;
 
             if (isSecure && security.AutoDiscoverServerCertificate)
@@ -259,11 +259,30 @@ namespace TinyUa.Client
                     ("serverCertThumbprint", remoteCert?.Thumbprint),
                     ("securityLevel", selected.SecurityLevel));
 
-                if (security.UserIdentity.Type == UserTokenType.UserName && selected.UserIdentityTokens != null)
+                // Validate the discovered server certificate unless the caller opted into
+                // auto-trust. Without this, AutoAcceptServerCertificate=false had no effect.
+                if (!security.AutoAcceptServerCertificate)
                 {
-                    var userNamePolicy = selected.UserIdentityTokens
-                        .FirstOrDefault(t => t.TokenType == UserTokenType.UserName);
-                    userNamePolicyId = userNamePolicy?.PolicyId;
+                    var validator = new CertificateValidator();
+                    try
+                    {
+                        validator.Validate(remoteCert, isServerCertificate: true);
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new UaException(0x80120000,
+                            $"Server certificate validation failed: {ex.Message}");
+                    }
+                }
+
+                // Resolve the server's PolicyId for the configured user token type (UserName or
+                // Certificate). Anonymous needs no policy id. Matching by TokenType ensures a
+                // Certificate identity gets the certificate policy id, not the username one.
+                if (security.UserIdentity.Type != UserTokenType.Anonymous && selected.UserIdentityTokens != null)
+                {
+                    var tokenPolicy = selected.UserIdentityTokens
+                        .FirstOrDefault(t => t.TokenType == security.UserIdentity.Type);
+                    userTokenPolicyId = tokenPolicy?.PolicyId;
                 }
             }
 
@@ -298,7 +317,7 @@ namespace TinyUa.Client
                 ("serverSignatureAlg", createResponse.ServerSignature?.Algorithm),
                 ("endpointsCount", createResponse.ServerEndpoints?.Length ?? 0));
 
-            var identity = BuildUserIdentity(security.UserIdentity, createResponse, policy, userNamePolicyId);
+            var identity = BuildUserIdentity(security.UserIdentity, createResponse, policy, userTokenPolicyId);
             await _client.ActivateSessionAsync(identity).ConfigureAwait(false);
 
             _client.ConnectionLost += OnSocketConnectionLost;
@@ -466,14 +485,14 @@ namespace TinyUa.Client
             UserIdentityOptions identityOptions,
             CreateSessionResponse createResponse,
             SecurityPolicy policy,
-            string? userNamePolicyId)
+            string? userTokenPolicyId)
         {
             if (identityOptions.Type == UserTokenType.UserName)
             {
                 return UserIdentityToken.CreateUserName(
                     identityOptions.Username ?? "",
                     identityOptions.Password ?? "",
-                    userNamePolicyId,
+                    userTokenPolicyId,
                     createResponse.ServerNonce,
                     createResponse.ServerCertificate,
                     policy.Uri);
@@ -484,7 +503,7 @@ namespace TinyUa.Client
                 return new UserIdentityToken
                 {
                     TokenType = UserTokenType.Certificate,
-                    PolicyId = userNamePolicyId,
+                    PolicyId = userTokenPolicyId,
                     IssuedId = policy.SenderCertificate,
                     SecurityPolicyUri = policy.Uri
                 };
@@ -668,7 +687,7 @@ namespace TinyUa.Client
 
             foreach (var item in template.Items)
             {
-                await sub.AddMonitoredItemAsync(item.NodeId, item.SamplingInterval, item.Handler, item.QueueSize).ConfigureAwait(false);
+                await sub.AddMonitoredItemAsync(item.NodeId, item.SamplingInterval, item.Handler, item.QueueSize, item.HandlerEx).ConfigureAwait(false);
             }
 
             return sub;
@@ -977,6 +996,12 @@ namespace TinyUa.Client
             TaskCompletionSource<Subscription>? pending;
             bool iAmCreator;
 
+            // Dedup and pending-create tracking must use the same resolution, otherwise two
+            // near-equal intervals (e.g. 500.0 vs 500.0004) pass the reuse scan yet get distinct
+            // raw-double dictionary keys and create duplicate subscriptions. Quantize the key to
+            // the same 0.001 ms granularity used by the reuse comparison below.
+            double intervalKey = Math.Round(interval, 3);
+
             lock (_subsLock)
             {
 
@@ -986,7 +1011,7 @@ namespace TinyUa.Client
                         return sub;
                 }
 
-                if (_pendingSubscriptionCreates.TryGetValue(interval, out pending))
+                if (_pendingSubscriptionCreates.TryGetValue(intervalKey, out pending))
                 {
                     iAmCreator = false;
                 }
@@ -995,7 +1020,7 @@ namespace TinyUa.Client
                     iAmCreator = true;
                     pending = new TaskCompletionSource<Subscription>(
                         TaskCreationOptions.RunContinuationsAsynchronously);
-                    _pendingSubscriptionCreates[interval] = pending;
+                    _pendingSubscriptionCreates[intervalKey] = pending;
                 }
             }
 
@@ -1016,7 +1041,7 @@ namespace TinyUa.Client
             finally
             {
                 lock (_subsLock)
-                    _pendingSubscriptionCreates.Remove(interval);
+                    _pendingSubscriptionCreates.Remove(intervalKey);
             }
         }
 
@@ -1129,7 +1154,58 @@ namespace TinyUa.Client
             return sub;
         }
 
-        private void UpdateTemplate(Subscription sub, NodeId nodeId, double samplingInterval, uint queueSize, DataChangeHandler? handler)
+        /// <summary>
+        /// Subscribe to data changes for a single node with an extended callback that also
+        /// receives the source and server timestamps. Same (nodeId, value, status) as the
+        /// standard callback plus <c>sourceTimestamp</c>/<c>serverTimestamp</c> (nullable).
+        /// </summary>
+        /// <param name="nodeId">The node to monitor.</param>
+        /// <param name="handler">Extended data change callback <see cref="DataChangeHandlerEx"/>.</param>
+        /// <param name="interval">Sampling interval in milliseconds, default 1000.</param>
+        /// <param name="queueSize">Queue size, 0 for default.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>Subscription and monitored item ID tuple.</returns>
+        public async Task<(Subscription Subscription, uint MonitoredItemId)> SubscribeAsync(
+            NodeId nodeId, DataChangeHandlerEx handler, double interval = 1000.0, uint queueSize = 0,
+            CancellationToken cancellationToken = default)
+        {
+            if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+
+            await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
+            var sub = await GetOrCreateDefaultSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
+            var item = await sub.AddMonitoredItemAsync(nodeId, interval, handler: null, queueSize, handlerEx: handler).ConfigureAwait(false);
+            UpdateTemplate(sub, nodeId, interval, queueSize, handler: null, handlerEx: handler);
+            return (sub, item.MonitoredItemId);
+        }
+
+        /// <summary>
+        /// Subscribe to multiple nodes in batch with an extended callback that also receives
+        /// the source and server timestamps. All nodes share the same callback and interval.
+        /// </summary>
+        /// <param name="nodeIds">The nodes to monitor.</param>
+        /// <param name="handler">Extended data change callback <see cref="DataChangeHandlerEx"/>.</param>
+        /// <param name="interval">Sampling interval in milliseconds.</param>
+        /// <param name="queueSize">Queue size.</param>
+        /// <param name="cancellationToken">Cancellation token.</param>
+        /// <returns>The subscription.</returns>
+        public async Task<Subscription> SubscribeAsync(NodeId[] nodeIds, DataChangeHandlerEx handler, double interval = 1000.0, uint queueSize = 0, CancellationToken cancellationToken = default)
+        {
+            if (nodeIds == null) throw new ArgumentNullException(nameof(nodeIds));
+            if (nodeIds.Length == 0) throw new ArgumentException("NodeIds array cannot be empty", nameof(nodeIds));
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+
+            await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
+            var sub = await GetOrCreateDefaultSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
+            for (int i = 0; i < nodeIds.Length; i++)
+            {
+                await sub.AddMonitoredItemAsync(nodeIds[i], interval, handler: null, queueSize, handlerEx: handler).ConfigureAwait(false);
+                UpdateTemplate(sub, nodeIds[i], interval, queueSize, handler: null, handlerEx: handler);
+            }
+            return sub;
+        }
+
+        private void UpdateTemplate(Subscription sub, NodeId nodeId, double samplingInterval, uint queueSize, DataChangeHandler? handler, DataChangeHandlerEx? handlerEx = null)
         {
 
             _reconnectEngine?.RegisterSubscription(new SubscriptionTemplate
@@ -1145,7 +1221,8 @@ namespace TinyUa.Client
                         NodeId = nodeId,
                         SamplingInterval = samplingInterval,
                         QueueSize = queueSize,
-                        Handler = handler
+                        Handler = handler,
+                        HandlerEx = handlerEx
                     }
                 }
             }, sub);

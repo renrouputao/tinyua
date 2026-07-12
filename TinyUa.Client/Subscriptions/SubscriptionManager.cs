@@ -19,6 +19,19 @@ namespace TinyUa.Client.Subscriptions
     /// <param name="status">The quality status code.</param>
     public delegate void DataChangeHandler(NodeId nodeId, object? value, StatusCode status);
 
+    /// <summary>
+    /// Extended data change callback. Carries the same (nodeId, value, status) as
+    /// <see cref="DataChangeHandler"/> plus the source and server timestamps from the notification.
+    /// The timestamps are nullable — they are absent when the server does not return them.
+    /// </summary>
+    /// <param name="nodeId">The NodeId of the monitored item that changed.</param>
+    /// <param name="value">The new value, or null.</param>
+    /// <param name="status">The quality status code (always available, even when the value is null).</param>
+    /// <param name="sourceTimestamp">The source timestamp, or null if not provided.</param>
+    /// <param name="serverTimestamp">The server timestamp, or null if not provided.</param>
+    public delegate void DataChangeHandlerEx(NodeId nodeId, object? value, StatusCode status,
+        DateTime? sourceTimestamp, DateTime? serverTimestamp);
+
     internal static class SubscriptionManager
     {
         internal static async Task<Subscription> CreateSubscriptionAsync(SubscriptionRouter router, double publishingInterval = 1000.0, bool autoStart = true, int maxPublishRequests = 2, ILogger? logger = null)
@@ -53,6 +66,7 @@ namespace TinyUa.Client.Subscriptions
         internal object? LastValue { get; set; }
         internal StatusCode LastStatus { get; set; } = new StatusCode();
         internal DataChangeHandler? OnDataChange { get; set; }
+        internal DataChangeHandlerEx? OnDataChangeEx { get; set; }
     }
 
     /// <summary>
@@ -118,7 +132,7 @@ namespace TinyUa.Client.Subscriptions
             return await AddMonitoredItemAsync(nodeId, PublishingInterval, handler, queueSize).ConfigureAwait(false);
         }
 
-        internal async Task<MonitoredItem> AddMonitoredItemAsync(NodeId nodeId, double samplingInterval, DataChangeHandler? handler = null, uint queueSize = 0)
+        internal async Task<MonitoredItem> AddMonitoredItemAsync(NodeId nodeId, double samplingInterval, DataChangeHandler? handler = null, uint queueSize = 0, DataChangeHandlerEx? handlerEx = null)
         {
             var clientHandle = (uint)Interlocked.Increment(ref _nextClientHandle);
             var results = await _router.CreateMonitoredItemsAsync(SubscriptionId, new[] { nodeId }, AttributeId.Value, samplingInterval, new[] { clientHandle }, queueSize).ConfigureAwait(false);
@@ -139,6 +153,8 @@ namespace TinyUa.Client.Subscriptions
 
             if (handler != null)
                 item.OnDataChange = handler;
+            if (handlerEx != null)
+                item.OnDataChangeEx = handlerEx;
 
             lock (_lock)
                 MonitoredItems[clientHandle] = item;
@@ -369,6 +385,8 @@ namespace TinyUa.Client.Subscriptions
             MonitoredItem? item;
             object? capturedValue;
             StatusCode capturedStatus;
+            DateTime? capturedSourceTs;
+            DateTime? capturedServerTs;
 
             lock (_lock)
             {
@@ -376,12 +394,17 @@ namespace TinyUa.Client.Subscriptions
                     return;
                 capturedValue = value?.Value?.Value;
                 capturedStatus = value?.StatusCode ?? new StatusCode();
+                capturedSourceTs = value?.SourceTimestamp;
+                capturedServerTs = value?.ServerTimestamp;
                 item.LastValue = capturedValue;
                 item.LastStatus = capturedStatus;
             }
 
             try { item.OnDataChange?.Invoke(item.NodeId, capturedValue, capturedStatus); }
             catch (Exception ex) { _logger?.LogWarning(ex, $"Subscription {SubscriptionId}: OnDataChange handler threw"); }
+
+            try { item.OnDataChangeEx?.Invoke(item.NodeId, capturedValue, capturedStatus, capturedSourceTs, capturedServerTs); }
+            catch (Exception ex) { _logger?.LogWarning(ex, $"Subscription {SubscriptionId}: OnDataChangeEx handler threw"); }
 
             try { OnDataChange?.Invoke(item.NodeId, capturedValue, capturedStatus); }
             catch (Exception ex) { _logger?.LogWarning(ex, $"Subscription {SubscriptionId}: OnDataChange event handler threw"); }

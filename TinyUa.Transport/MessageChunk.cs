@@ -15,13 +15,21 @@ namespace TinyUa.Transport
     {
         private static readonly System.Collections.Concurrent.ConcurrentBag<BinaryEncoder> s_encoderPool = new();
 
+        // Encoders whose buffer grew beyond this after a one-off large message are dropped instead
+        // of pooled, so a single huge message doesn't pin a large buffer for the process lifetime.
+        private const int MaxPooledEncoderCapacity = 512 * 1024;
+
         private static BinaryEncoder RentEncoder()
         {
             if (s_encoderPool.TryTake(out var e)) { e.Reset(); return e; }
             return new BinaryEncoder();
         }
 
-        private static void ReturnEncoder(BinaryEncoder e) => s_encoderPool.Add(e);
+        private static void ReturnEncoder(BinaryEncoder e)
+        {
+            if (e.Capacity <= MaxPooledEncoderCapacity)
+                s_encoderPool.Add(e);
+        }
 
         internal Header MessageHeader { get; set; } = null!;
         internal object SecurityHeader { get; set; } = null!;
@@ -203,7 +211,7 @@ namespace TinyUa.Transport
                     Buffer.BlockCopy(paddedBody, 0, signedData, headerBytes.Length + securityBytes.Length, paddedBody.Length);
                     var signature = Cryptography.Sign(signedData);
 
-                    if (SecurityHeader is AsymmetricAlgorithmHeader asymForVerify)
+                    if (SecurityDebugLogger.IsDebugEnabled && SecurityHeader is AsymmetricAlgorithmHeader asymForVerify)
                     {
                         try
                         {
@@ -241,7 +249,7 @@ namespace TinyUa.Transport
                     Buffer.BlockCopy(signature, 0, plaintextWithSig, paddedBody.Length, signature.Length);
                     var encrypted = Cryptography.Encrypt(plaintextWithSig);
 
-                    if (SecurityHeader is AsymmetricAlgorithmHeader asymForEnc)
+                    if (SecurityDebugLogger.IsDebugEnabled && SecurityHeader is AsymmetricAlgorithmHeader asymForEnc)
                     {
                         try
                         {
@@ -304,7 +312,7 @@ namespace TinyUa.Transport
                     encoder.WriteBytes(securityBytes);
                     encoder.WriteBytes(encrypted);
 
-                    if (SecurityHeader is AsymmetricAlgorithmHeader asymForLog)
+                    if (SecurityDebugLogger.IsDebugEnabled && SecurityHeader is AsymmetricAlgorithmHeader asymForLog)
                     {
                         var finalMessage = encoder.ToByteArray();
                         var uriForLog = asymForLog.SecurityPolicyUri ?? "";
@@ -399,8 +407,12 @@ namespace TinyUa.Transport
             }
 
             var crypto = securityPolicy.SymmetricCryptography;
-            var maxSize = MaxBodySize(crypto, maxChunkSize);
-            if (maxSize <= 0) maxSize = 65536;
+            // OPC UA Part 6 mandates a minimum negotiated buffer of 8192 bytes. Clamp to that
+            // floor so a too-small or not-yet-negotiated maxChunkSize can't yield a non-positive
+            // body limit — the previous hardcoded 65536 fallback produced chunks larger than the
+            // channel's actual buffer, which a conformant server rejects.
+            var maxSize = MaxBodySize(crypto, Math.Max(maxChunkSize, 8192));
+            if (maxSize <= 0) maxSize = MaxBodySize(crypto, 8192);
 
             if (body.Length <= maxSize)
             {

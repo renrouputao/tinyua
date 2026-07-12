@@ -17,7 +17,23 @@ namespace TinyUa.Core.Security
             if (policy.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
                 return policy;
 
-            return PolicyUriPrefix + policy;
+            return PolicyUriPrefix + CanonicalPolicyName(policy);
+        }
+
+        /// <summary>
+        /// Maps a caller-supplied short policy name to the canonical OPC UA suffix. Accepts both the
+        /// compact spelling used in the docs/README ("Aes128Sha256RsaOaep") and the underscored
+        /// spec suffix ("Aes128_Sha256_RsaOaep") so neither yields a "no matching endpoint" failure.
+        /// Unknown names pass through unchanged.
+        /// </summary>
+        private static string CanonicalPolicyName(string policy)
+        {
+            return policy switch
+            {
+                "Aes128Sha256RsaOaep" or "Aes128_Sha256_RsaOaep" => "Aes128_Sha256_RsaOaep",
+                "Aes256Sha256RsaPss" or "Aes256_Sha256_RsaPss" => "Aes256_Sha256_RsaPss",
+                _ => policy
+            };
         }
 
         internal static SecurityPolicy Create(

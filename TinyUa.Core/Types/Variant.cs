@@ -107,12 +107,17 @@ namespace TinyUa.Core.Types
         /// <param name="type">Optional explicit OPC UA type. If null, the type is guessed from the CLR type.</param>
         public Variant(object? value, VariantType? type = null)
         {
-            if (type != null && value != null)
+            // Only convert scalar values to the target CLR type. Arrays (other than byte[],
+            // which is a ByteString scalar) are not IConvertible — running them through
+            // ConvertToTargetType throws (numeric arrays) or corrupts them to "System.T[]"
+            // (string arrays). Their elements already carry the correct type from the decoder.
+            bool isArrayValue = value is Array && value.GetType() != typeof(byte[]);
+            if (type != null && value != null && !isArrayValue)
                 value = ConvertToTargetType(value, type.Value);
 
             Value = value;
             VariantType = type ?? GuessType(value);
-            IsArray = value is Array && value.GetType() != typeof(byte[]);
+            IsArray = isArrayValue;
 
             if (IsArray && value is Array arr)
             {
@@ -158,6 +163,22 @@ namespace TinyUa.Core.Types
 
             var type = value.GetType();
 
+            // Arrays (except byte[], which is the ByteString scalar) are guessed from their
+            // element type — otherwise a string[]/int[] would fall through to ExtensionObject
+            // and mis-encode. The IsArray flag drives the array-vs-scalar encode path separately.
+            if (type.IsArray && type != typeof(byte[]))
+            {
+                var elementType = type.GetElementType();
+                return elementType != null
+                    ? GuessScalarType(elementType)
+                    : VariantType.ExtensionObject;
+            }
+
+            return GuessScalarType(type);
+        }
+
+        private static VariantType GuessScalarType(Type type)
+        {
             if (type == typeof(bool))
                 return VariantType.Boolean;
             if (type == typeof(sbyte))
@@ -202,13 +223,6 @@ namespace TinyUa.Core.Types
                 return VariantType.DataValue;
             if (type == typeof(Variant))
                 return VariantType.Variant;
-
-            if (type.IsArray)
-            {
-                var elementType = type.GetElementType();
-                if (elementType == typeof(byte))
-                    return VariantType.ByteString;
-            }
 
             return VariantType.ExtensionObject;
         }

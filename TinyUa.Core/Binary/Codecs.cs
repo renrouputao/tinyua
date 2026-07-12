@@ -328,6 +328,9 @@ namespace TinyUa.Core.Binary
             if (hasDimensions)
             {
                 var dimCount = decoder.ReadInt32();
+                if (dimCount < 0 || dimCount > decoder.Remaining / 4)
+                    throw new UaException(0x80000000,
+                        $"Invalid variant dimension count: {dimCount}");
                 dimensions = new int[dimCount];
                 for (int i = 0; i < dimCount; i++)
                 {
@@ -372,6 +375,12 @@ namespace TinyUa.Core.Binary
             var length = decoder.ReadInt32();
             if (length < 0)
                 return Array.Empty<object>();
+
+            // Guard against a malformed/hostile length prefix over-allocating: every element
+            // consumes at least one byte, so a valid count cannot exceed the bytes remaining.
+            if (length > decoder.Remaining)
+                throw new UaException(0x80000000,
+                    $"Array length {length} exceeds remaining buffer ({decoder.Remaining} bytes)");
 
             var elementType = GetElementType(type);
             var array = Array.CreateInstance(elementType, length);

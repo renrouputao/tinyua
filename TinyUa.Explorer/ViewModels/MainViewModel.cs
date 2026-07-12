@@ -354,7 +354,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
             if (result?.DataValue != null)
             {
                 var dv = result.DataValue;
-                WriteValue = dv.Value?.Value?.ToString() ?? "";
+                WriteValue = FormatValue(dv.Value?.Value);
                 StatusText = $"Read: {WriteValue} [{dv.StatusCode}]";
             }
         }
@@ -491,7 +491,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
                 {
                     _syncContext.Post(_ =>
                     {
-                        row.Value = value?.ToString() ?? "null";
+                        row.Value = FormatValue(value);
                         row.Timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
                         row.Status = status.IsGood ? "Good" : status.ToString();
                     }, null);
@@ -529,7 +529,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
                 {
                     _syncContext.Post(_ =>
                     {
-                        row.Value = value?.ToString() ?? "null";
+                        row.Value = FormatValue(value);
                         row.Timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
                         row.Status = status.IsGood ? "Good" : status.ToString();
                     }, null);
@@ -599,8 +599,31 @@ public partial class MainViewModel : ObservableObject, IDisposable
             AttributeId.DataType => FormatDataType(rawValue),
             AttributeId.AccessLevel => FormatAccessLevel(rawValue),
             AttributeId.NodeClass => FormatNodeClass(rawValue),
-            _ => rawValue.ToString() ?? ""
+            _ => FormatValue(rawValue)
         };
+    }
+
+    /// <summary>
+    /// Renders a decoded OPC UA value for display. Arrays are shown as "[a, b, c]" instead of
+    /// the CLR default "System.String[]"; a ByteString is shown as hex; scalars use ToString().
+    /// </summary>
+    private static string FormatValue(object? value)
+    {
+        if (value == null) return "null";
+        if (value is string s) return s;
+        if (value is byte[] bytes)
+            return bytes.Length == 0 ? "(empty)" : Convert.ToHexString(bytes);
+        if (value is System.Collections.IEnumerable enumerable)
+        {
+            var items = new List<string>();
+            foreach (var item in enumerable)
+            {
+                if (items.Count >= 200) { items.Add("…"); break; }
+                items.Add(item?.ToString() ?? "null");
+            }
+            return "[" + string.Join(", ", items) + "]";
+        }
+        return value.ToString() ?? "";
     }
 
     private static string FormatDataType(object rawValue)

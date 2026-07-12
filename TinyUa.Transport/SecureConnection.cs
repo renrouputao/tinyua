@@ -379,21 +379,27 @@ namespace TinyUa.Transport
                 }
 
                 RevolveTokens();
-                SecurityPolicy.MakeRemoteSymmetricKey(LocalNonce, RemoteNonce);
-                PrevSecurityToken.ChannelId = 0;
-                PrevSecurityToken.TokenId = 0;
-                PrevSecurityToken.CreatedAt = DateTime.MinValue;
-                PrevSecurityToken.RevisedLifetime = 0;
+                RetirePreviousToken();
             }
 
             if (PrevSecurityToken.TokenId != 0)
             {
-                SecurityPolicy.MakeRemoteSymmetricKey(LocalNonce, RemoteNonce);
-                PrevSecurityToken.ChannelId = 0;
-                PrevSecurityToken.TokenId = 0;
-                PrevSecurityToken.CreatedAt = DateTime.MinValue;
-                PrevSecurityToken.RevisedLifetime = 0;
+                RetirePreviousToken();
             }
+        }
+
+        /// <summary>
+        /// Re-derives the remote symmetric key for the now-current token and clears the previous
+        /// token slot. Called once the first message on a rotated token is seen (whether the
+        /// rotation was driven by an incoming header or by a local send that revolved the tokens).
+        /// </summary>
+        private void RetirePreviousToken()
+        {
+            SecurityPolicy.MakeRemoteSymmetricKey(LocalNonce, RemoteNonce);
+            PrevSecurityToken.ChannelId = 0;
+            PrevSecurityToken.TokenId = 0;
+            PrevSecurityToken.CreatedAt = DateTime.MinValue;
+            PrevSecurityToken.RevisedLifetime = 0;
         }
 
         private object Receive(MessageChunk chunk)
@@ -444,14 +450,19 @@ namespace TinyUa.Transport
             var seqNum = chunk.SequenceHeader.SequenceNumber;
             if (!chunk.MessageHeader.IsSecureOpen && _peerSequenceNumber.HasValue)
             {
-                if (seqNum != _peerSequenceNumber.Value + 1)
-                {
-                    var wrapThreshold = uint.MaxValue - 1024;
-                    var isWrap = seqNum < 1024 && _peerSequenceNumber.Value >= wrapThreshold;
-                    if (!isWrap)
-                    {
+                // A valid peer sequence number must be strictly greater than the last one,
+                // except for a single permitted rollover near uint.MaxValue (OPC UA Part 6).
+                const uint minSequenceNumber = uint.MaxValue - 1024;
+                const uint maxRolloverSequenceNumber = 1024;
 
-                    }
+                bool isIncreasing = seqNum > _peerSequenceNumber.Value;
+                bool isWrap = _peerSequenceNumber.Value > minSequenceNumber
+                    && seqNum < maxRolloverSequenceNumber;
+
+                if (!isIncreasing && !isWrap)
+                {
+                    throw new UaException(0x80880000,
+                        $"Out-of-order sequence number: got {seqNum}, expected > {_peerSequenceNumber.Value}");
                 }
             }
             _peerSequenceNumber = seqNum;

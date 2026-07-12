@@ -26,13 +26,21 @@ namespace TinyUa.Client.Connection
 
         private static readonly ConcurrentBag<BinaryEncoder> s_encoderPool = new();
 
+        // Encoders whose buffer grew beyond this after a one-off large message are dropped instead
+        // of pooled, so a single huge message doesn't pin a large buffer for the process lifetime.
+        private const int MaxPooledEncoderCapacity = 512 * 1024;
+
         private static BinaryEncoder RentEncoder()
         {
             if (s_encoderPool.TryTake(out var e)) { e.Reset(); return e; }
             return new BinaryEncoder(4096);
         }
 
-        private static void ReturnEncoder(BinaryEncoder e) => s_encoderPool.Add(e);
+        private static void ReturnEncoder(BinaryEncoder e)
+        {
+            if (e.Capacity <= MaxPooledEncoderCapacity)
+                s_encoderPool.Add(e);
+        }
 
         private Socket? _socket;
         private NetworkStream? _stream;

@@ -67,6 +67,13 @@ namespace TinyUa.Core.Binary
         /// </summary>
         public int Length => _position;
 
+        /// <summary>
+        /// Gets the current capacity of the internal buffer in bytes. Grows as data is written.
+        /// Useful for pooling decisions — an encoder whose buffer grew very large after a one-off
+        /// message can be dropped instead of retained.
+        /// </summary>
+        public int Capacity => _buffer.Length;
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void EnsureCapacity(int count)
         {

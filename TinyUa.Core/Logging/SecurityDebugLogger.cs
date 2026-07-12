@@ -12,6 +12,20 @@ namespace TinyUa.Core.Logging
 
         internal static void SetCurrentLogger(ILogger? logger) => _current.Value = logger;
 
+        /// <summary>
+        /// Gets whether the current ambient logger has Debug logging enabled. Use this to gate
+        /// expensive diagnostic-only work (e.g. self-verify round-trips) so it is skipped entirely
+        /// when debug logging is off, not merely suppressed at the log call.
+        /// </summary>
+        internal static bool IsDebugEnabled
+        {
+            get
+            {
+                var logger = _current.Value;
+                return logger != null && logger.IsEnabled(LogLevel.Debug);
+            }
+        }
+
         internal static void LogStage(string stage, params (string key, object? value)[] fields)
         {
             var logger = _current.Value;

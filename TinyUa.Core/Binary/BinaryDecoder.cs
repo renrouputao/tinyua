@@ -267,6 +267,12 @@ namespace TinyUa.Core.Binary
             if (length <= 0)
                 return Array.Empty<T>();
 
+            // Guard against a malformed/hostile length prefix over-allocating: every element
+            // consumes at least one byte, so a valid count cannot exceed the bytes remaining.
+            if (length > Remaining)
+                throw new InvalidOperationException(
+                    $"Array length {length} exceeds remaining buffer ({Remaining} bytes)");
+
             var result = new T[length];
             for (int i = 0; i < length; i++)
             {

@@ -99,10 +99,18 @@ namespace TinyUa.Core.Security.Cryptography
 
             if (_blockSize > 256)
             {
+                if (data.Length < 2)
+                    throw new CryptographicException("Invalid padding: data too short.");
                 int padSize = (data[^2] | (data[^1] << 8)) + 2;
+                if (padSize > data.Length)
+                    throw new CryptographicException($"Invalid padding length {padSize} for {data.Length} bytes.");
                 return data[..^padSize];
             }
+            if (data.Length < 1)
+                throw new CryptographicException("Invalid padding: data too short.");
             int pad = data[^1] + 1;
+            if (pad > data.Length)
+                throw new CryptographicException($"Invalid padding length {pad} for {data.Length} bytes.");
             return data[..^pad];
         }
 

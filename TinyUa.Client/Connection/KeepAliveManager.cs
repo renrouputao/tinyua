@@ -45,7 +45,7 @@ namespace TinyUa.Client.Connection
                 if (_disposed) return;
                 try
                 {
-                    await _client.RenewSecureChannelAsync().ConfigureAwait(false);
+                    await _client.RenewSecureChannelAsync((uint)_channelLifetimeMs).ConfigureAwait(false);
                     Interlocked.Increment(ref _channelKeepAliveCount);
                     ChannelRenewed?.Invoke();
                 }

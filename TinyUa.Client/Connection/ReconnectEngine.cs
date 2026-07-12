@@ -331,5 +331,6 @@ namespace TinyUa.Client.Connection
         internal uint QueueSize { get; set; }
         internal uint ClientHandle { get; set; }
         internal DataChangeHandler? Handler { get; set; }
+        internal DataChangeHandlerEx? HandlerEx { get; set; }
     }
 }
