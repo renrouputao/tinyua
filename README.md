@@ -8,6 +8,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://dotnet.microsoft.com/en-us/download/dotnet/8.0"><img src="https://img.shields.io/badge/.NET-8.0-512BD4.svg" alt=".NET 8"></a>
   <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/contributions-welcome-brightgreen.svg" alt="Contributions Welcome"></a>
+  <a href="https://www.nuget.org/packages/TinyUa.Client"><img src="https://img.shields.io/nuget/v/TinyUa.Client.svg" alt="NuGet"></a>
 </p>
 
 TinyUa implements the complete OPC UA binary protocol stack from scratch — binary encoding, four security policies, message chunking, secure channels, and a high-level client with a Fluent API. The core libraries have **zero dependency on the OPC Foundation SDK**. All cryptography uses only `System.Security.Cryptography` from .NET 8.
@@ -64,6 +65,23 @@ TinyUa implements the complete OPC UA binary protocol stack from scratch — bin
 - **Benchmarks** — BenchmarkDotNet-based performance and crypto primitive benchmarks
 
 ## Quick Start
+
+### Install via NuGet
+
+TinyUa is available as three NuGet packages on [nuget.org](https://www.nuget.org/):
+
+| Package | Description |
+|---------|-------------|
+| [`TinyUa.Client`](https://www.nuget.org/packages/TinyUa.Client) | Full OPC UA client — includes Core + Transport as transitive dependencies |
+| [`TinyUa.Transport`](https://www.nuget.org/packages/TinyUa.Transport) | Message chunking and secure channel layer — depends on Core |
+| [`TinyUa.Core`](https://www.nuget.org/packages/TinyUa.Core) | Binary encoding, type system, and security policies — zero external deps |
+
+**For most users,** just install `TinyUa.Client` — it pulls in the other two automatically:
+
+```bash
+dotnet add package TinyUa.Client
+```
+
 
 ### Prerequisites
 
