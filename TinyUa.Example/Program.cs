@@ -10,7 +10,8 @@ namespace OpcUa.Example;
 
 class Program
 {
-    const string DefaultUrl = "opc.tcp://localhost:48010";
+    // kepware test server
+    const string DefaultUrl = "opc.tcp://localhost:49320";
 
     static async Task Main(string[] args)
     {
@@ -38,10 +39,10 @@ class Program
         await Example_Basic256Sha256_Anonymous(url);
 
         // Example 2: Aes128_Sha256_RsaOaep + UserName
-        await Example_Aes128_UserName(url);
+        //await Example_Aes128_UserName(url);
 
         // Example 3: Aes256_Sha256_RsaPss + Anonymous (using options object)
-        await Example_Aes256_Options(url);
+        //await Example_Aes256_Options(url);
 
         Console.WriteLine("All examples completed.");
     }
@@ -53,9 +54,9 @@ class Program
     static async Task Example_NoneSecurity(string url)
     {
         Console.WriteLine("── 0. None Security (no encryption, anonymous) ──");
+        
         await using var client = await UaClient
             .ConnectTo(url)
-            .WithAppName("TinyUa-Example-None")
             .BuildAndRunAsync();
 
         Console.WriteLine($"  Connected: {client.IsConnected}, Session: {client.SessionId}");
@@ -74,9 +75,18 @@ class Program
         Console.WriteLine("── 1. Basic256Sha256 + Anonymous ──");
         Console.WriteLine("     (RSA-2048/PKCS1-SHA256 OPN, AES-256-CBC MSG, HMAC-SHA256)");
 
+        var certFile = @"C:\Users\skyal\Desktop\tinyuacerts\TinyUa Client.pfx";
         await using var client = await UaClient
             .ConnectTo(url)
-            .WithAppName("TinyUa-Example-B256")
+            .WithSecurity("Basic256Sha256")
+                .WithSecurity(opts =>
+                {
+                    opts.Certificate = new CertificateOptions
+                    {
+                        CertificatePath = certFile,
+                        AutoGenerate = false
+                    };
+                })
             .WithSecurity("Basic256Sha256")   // OPN: RSA-PKCS1-SHA256, MSG: AES-256 + HMAC-SHA256
             .BuildAndRunAsync();
 

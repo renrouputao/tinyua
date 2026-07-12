@@ -145,7 +145,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the OpenSecureChannel service request used to establish or renew a secure channel.
     /// </summary>
-    public class OpenSecureChannelRequest : IEncodable
+    public class OpenSecureChannelRequest : IServiceRequest
     {
         /// <summary>Gets or sets the service request header.</summary>
         public RequestHeader RequestHeader { get; set; } = new RequestHeader();
@@ -192,7 +192,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the OpenSecureChannel service response returned by the server.
     /// </summary>
-    public class OpenSecureChannelResponse : IDecodable<OpenSecureChannelResponse>
+    public class OpenSecureChannelResponse : IDecodable<OpenSecureChannelResponse>, IServiceResponse
     {
         /// <summary>Gets or sets the service response header.</summary>
         public ResponseHeader ResponseHeader { get; set; } = null!;

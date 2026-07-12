@@ -70,7 +70,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents a complete OPC UA Write service request.
     /// </summary>
-    public class WriteRequest : IEncodable
+    public class WriteRequest : IServiceRequest
     {
         /// <summary>
         /// Gets or sets the request header for the service call.
@@ -97,7 +97,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents a response from a Write service call.
     /// </summary>
-    public class WriteResponse : IDecodable<WriteResponse>
+    public class WriteResponse : IDecodable<WriteResponse>, IServiceResponse
     {
         /// <summary>
         /// Gets or sets the response header containing the service result.

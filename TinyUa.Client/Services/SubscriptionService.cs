@@ -122,7 +122,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the CreateSubscription service request used to create a new subscription on the server.
     /// </summary>
-    public class CreateSubscriptionRequest : IEncodable
+    public class CreateSubscriptionRequest : IServiceRequest
     {
         /// <summary>Gets or sets the service request header.</summary>
         public RequestHeader RequestHeader { get; set; } = new RequestHeader();
@@ -145,7 +145,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the CreateSubscription service response returned by the server.
     /// </summary>
-    public class CreateSubscriptionResponse : IDecodable<CreateSubscriptionResponse>
+    public class CreateSubscriptionResponse : IDecodable<CreateSubscriptionResponse>, IServiceResponse
     {
         /// <summary>Gets or sets the service response header.</summary>
         public ResponseHeader ResponseHeader { get; set; } = null!;
@@ -215,7 +215,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the CreateMonitoredItems service request used to add items to a subscription for monitoring.
     /// </summary>
-    public class CreateMonitoredItemsRequest : IEncodable
+    public class CreateMonitoredItemsRequest : IServiceRequest
     {
         /// <summary>Gets or sets the service request header.</summary>
         public RequestHeader RequestHeader { get; set; } = new RequestHeader();
@@ -259,7 +259,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the CreateMonitoredItems service response returned by the server.
     /// </summary>
-    public class CreateMonitoredItemsResponse : IDecodable<CreateMonitoredItemsResponse>
+    public class CreateMonitoredItemsResponse : IDecodable<CreateMonitoredItemsResponse>, IServiceResponse
     {
         /// <summary>Gets or sets the service response header.</summary>
         public ResponseHeader ResponseHeader { get; set; } = null!;

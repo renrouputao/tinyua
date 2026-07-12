@@ -7,12 +7,17 @@ using TinyUa.Core.Logging;
 namespace TinyUa.Client.Connection
 {
 
+    /// <summary>
+    /// Periodically renews the secure channel token before it expires. Note: this manages the
+    /// CHANNEL only — session liveness relies on request traffic (or the default 1h session
+    /// timeout); there is no separate session keep-alive read.
+    /// </summary>
     internal class KeepAliveManager : IDisposable
     {
         private readonly UaConnection _client;
         private readonly ILogger _logger;
         private Timer? _channelRenewTimer;
-        private bool _disposed;
+        private volatile bool _disposed;
         private readonly int _channelLifetimeMs;
         private int _channelKeepAliveCount;
 

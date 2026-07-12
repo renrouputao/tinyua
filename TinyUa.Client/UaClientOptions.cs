@@ -59,11 +59,39 @@ namespace TinyUa.Client
         /// <summary>Cap for exponential backoff delay in milliseconds. Default 30000 (30 seconds).</summary>
         public int ReconnectMaxDelayMs { get; set; } = 30000;
 
+        /// <summary>
+        /// Number of Publish requests the session-level publish engine keeps in flight. Default 2.
+        /// Higher values reduce notification latency under load at the cost of more queued
+        /// requests on the server (bounded by the server's MaxPublishRequestCount).
+        /// </summary>
+        public int MaxPublishRequests { get; set; } = 2;
+
         /// <summary>Security configuration (policy, mode, identity, certificates).</summary>
         public SecurityOptions Security { get; set; } = new();
 
         /// <summary>Returns a read-only copy of default options.</summary>
         public static UaClientOptions Default => new();
+
+        /// <summary>
+        /// Creates a deep copy. <see cref="UaClient"/> snapshots its options at construction so
+        /// that later mutations of the original object cannot affect a running client.
+        /// </summary>
+        public UaClientOptions Clone() => new()
+        {
+            ApplicationName = ApplicationName,
+            ApplicationUri = ApplicationUri,
+            ProductUri = ProductUri,
+            Timeout = Timeout,
+            SessionTimeout = SessionTimeout,
+            ChannelLifetime = ChannelLifetime,
+            MaxMessageSize = MaxMessageSize,
+            ErrorMode = ErrorMode,
+            ReconnectMaxRetries = ReconnectMaxRetries,
+            ReconnectInitialDelayMs = ReconnectInitialDelayMs,
+            ReconnectMaxDelayMs = ReconnectMaxDelayMs,
+            MaxPublishRequests = MaxPublishRequests,
+            Security = Security.Clone()
+        };
     }
 
     /// <summary>
@@ -104,6 +132,17 @@ namespace TinyUa.Client
         /// Set to <c>false</c> in production and register a custom validation callback.
         /// </summary>
         public bool AutoAcceptServerCertificate { get; set; } = true;
+
+        /// <summary>Creates a deep copy of these security options.</summary>
+        public SecurityOptions Clone() => new()
+        {
+            Policy = Policy,
+            Mode = Mode,
+            UserIdentity = UserIdentity.Clone(),
+            Certificate = Certificate.Clone(),
+            AutoDiscoverServerCertificate = AutoDiscoverServerCertificate,
+            AutoAcceptServerCertificate = AutoAcceptServerCertificate
+        };
     }
 
     /// <summary>
@@ -131,6 +170,16 @@ namespace TinyUa.Client
 
         /// <summary>X509 private key file path (only used with <see cref="UserTokenType.Certificate"/>).</summary>
         public string? PrivateKeyPath { get; set; }
+
+        /// <summary>Creates a copy of these user identity options.</summary>
+        public UserIdentityOptions Clone() => new()
+        {
+            Type = Type,
+            Username = Username,
+            Password = Password,
+            CertificatePath = CertificatePath,
+            PrivateKeyPath = PrivateKeyPath
+        };
     }
 
     /// <summary>
@@ -158,5 +207,16 @@ namespace TinyUa.Client
 
         /// <summary>Validity period in years for auto-generated certificates. Default 5.</summary>
         public int ValidityYears { get; set; } = 5;
+
+        /// <summary>Creates a copy of these certificate options.</summary>
+        public CertificateOptions Clone() => new()
+        {
+            CertificatePath = CertificatePath,
+            PrivateKeyPath = PrivateKeyPath,
+            PrivateKeyPassword = PrivateKeyPassword,
+            AutoGenerate = AutoGenerate,
+            KeySize = KeySize,
+            ValidityYears = ValidityYears
+        };
     }
 }

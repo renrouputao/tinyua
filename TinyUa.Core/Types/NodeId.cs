@@ -28,6 +28,12 @@ namespace TinyUa.Core.Types
     /// </summary>
     public class NodeId : IEquatable<NodeId?>, IComparable<NodeId?>
     {
+        // Numeric identifiers (the common case) live in _numeric so equality, hashing, and
+        // comparison never box. _reference holds string / byte[] identifiers, or the Guid boxed
+        // once at construction. Exactly one of the two is meaningful, selected by NodeIdType.
+        private ulong _numeric;
+        private object? _reference;
+
         /// <summary>
         /// Gets the encoding format of this NodeId.
         /// </summary>
@@ -40,8 +46,15 @@ namespace TinyUa.Core.Types
 
         /// <summary>
         /// Gets the identifier value. The runtime type depends on <see cref="NodeIdType"/>.
+        /// Numeric identifiers are boxed on access; use <see cref="GetNumericId"/> to avoid that.
         /// </summary>
-        public object? Identifier { get; private set; }
+        public object? Identifier => NodeIdType switch
+        {
+            NodeIdType.TwoByte => (byte)_numeric,
+            NodeIdType.FourByte => (ushort)_numeric,
+            NodeIdType.Numeric => (uint)_numeric,
+            _ => _reference
+        };
 
         /// <summary>
         /// Gets or sets the resolved namespace URI. Can be set externally via namespace table lookup.
@@ -61,7 +74,7 @@ namespace TinyUa.Core.Types
         {
             NodeIdType = NodeIdType.TwoByte;
             NamespaceIndex = 0;
-            Identifier = (byte)0;
+            _numeric = 0;
             NamespaceUri = null;
             ServerIndex = 0;
         }
@@ -78,20 +91,18 @@ namespace TinyUa.Core.Types
             {
                 NodeIdType = NodeIdType.TwoByte;
                 NamespaceIndex = 0;
-                Identifier = (byte)identifier;
             }
             else if (namespaceIndex <= byte.MaxValue && identifier <= ushort.MaxValue)
             {
                 NodeIdType = NodeIdType.FourByte;
                 NamespaceIndex = namespaceIndex;
-                Identifier = (ushort)identifier;
             }
             else
             {
                 NodeIdType = NodeIdType.Numeric;
                 NamespaceIndex = namespaceIndex;
-                Identifier = identifier;
             }
+            _numeric = identifier;
             NamespaceUri = null;
             ServerIndex = 0;
         }
@@ -106,7 +117,7 @@ namespace TinyUa.Core.Types
         {
             NodeIdType = NodeIdType.String;
             NamespaceIndex = namespaceIndex;
-            Identifier = identifier ?? throw new ArgumentNullException(nameof(identifier));
+            _reference = identifier ?? throw new ArgumentNullException(nameof(identifier));
             NamespaceUri = null;
             ServerIndex = 0;
         }
@@ -120,7 +131,7 @@ namespace TinyUa.Core.Types
         {
             NodeIdType = NodeIdType.Guid;
             NamespaceIndex = namespaceIndex;
-            Identifier = identifier;
+            _reference = identifier;
             NamespaceUri = null;
             ServerIndex = 0;
         }
@@ -135,7 +146,7 @@ namespace TinyUa.Core.Types
         {
             NodeIdType = NodeIdType.ByteString;
             NamespaceIndex = namespaceIndex;
-            Identifier = identifier ?? throw new ArgumentNullException(nameof(identifier));
+            _reference = identifier ?? throw new ArgumentNullException(nameof(identifier));
             NamespaceUri = null;
             ServerIndex = 0;
         }
@@ -214,9 +225,7 @@ namespace TinyUa.Core.Types
         {
             return NodeIdType switch
             {
-                NodeIdType.TwoByte => (byte)Identifier!,
-                NodeIdType.FourByte => (ushort)Identifier!,
-                NodeIdType.Numeric => (uint)Identifier!,
+                NodeIdType.TwoByte or NodeIdType.FourByte or NodeIdType.Numeric => (uint)_numeric,
                 _ => throw new InvalidOperationException("NodeId is not numeric")
             };
         }
@@ -232,12 +241,10 @@ namespace TinyUa.Core.Types
 
             return NodeIdType switch
             {
-                NodeIdType.TwoByte => (byte)Identifier! == 0,
-                NodeIdType.FourByte => (ushort)Identifier! == 0,
-                NodeIdType.Numeric => (uint)Identifier! == 0,
-                NodeIdType.String => string.IsNullOrEmpty((string?)Identifier),
-                NodeIdType.Guid => (Guid)Identifier! == Guid.Empty,
-                NodeIdType.ByteString => ((byte[]?)Identifier)?.Length == 0,
+                NodeIdType.TwoByte or NodeIdType.FourByte or NodeIdType.Numeric => _numeric == 0,
+                NodeIdType.String => string.IsNullOrEmpty((string?)_reference),
+                NodeIdType.Guid => (Guid)_reference! == Guid.Empty,
+                NodeIdType.ByteString => ((byte[]?)_reference)?.Length == 0,
                 _ => true
             };
         }
@@ -255,12 +262,10 @@ namespace TinyUa.Core.Types
 
             var idStr = NodeIdType switch
             {
-                NodeIdType.TwoByte => $"i={(byte)Identifier!}",
-                NodeIdType.FourByte => $"i={(ushort)Identifier!}",
-                NodeIdType.Numeric => $"i={(uint)Identifier!}",
-                NodeIdType.String => $"s={Identifier}",
-                NodeIdType.Guid => $"g={((Guid)Identifier!):D}",
-                NodeIdType.ByteString => $"b={Convert.ToBase64String((byte[])Identifier!)}",
+                NodeIdType.TwoByte or NodeIdType.FourByte or NodeIdType.Numeric => $"i={_numeric}",
+                NodeIdType.String => $"s={_reference}",
+                NodeIdType.Guid => $"g={((Guid)_reference!):D}",
+                NodeIdType.ByteString => $"b={Convert.ToBase64String((byte[])_reference!)}",
                 _ => $"i=0"
             };
             parts.Add(idStr);
@@ -284,9 +289,16 @@ namespace TinyUa.Core.Types
             if (other is null)
                 return false;
 
-            return NamespaceIndex == other.NamespaceIndex &&
-                   NodeIdType == other.NodeIdType &&
-                   Equals(Identifier, other.Identifier);
+            if (NamespaceIndex != other.NamespaceIndex || NodeIdType != other.NodeIdType)
+                return false;
+
+            return NodeIdType switch
+            {
+                // Numeric identifiers compare without boxing — this is the hot path for
+                // monitored-item routing and dictionary lookups.
+                NodeIdType.TwoByte or NodeIdType.FourByte or NodeIdType.Numeric => _numeric == other._numeric,
+                _ => Equals(_reference, other._reference)
+            };
         }
 
         /// <summary>
@@ -305,7 +317,12 @@ namespace TinyUa.Core.Types
         /// <returns>A hash code combining the namespace index, type, and identifier.</returns>
         public override int GetHashCode()
         {
-            return HashCode.Combine(NamespaceIndex, NodeIdType, Identifier);
+            int identifierHash = NodeIdType switch
+            {
+                NodeIdType.TwoByte or NodeIdType.FourByte or NodeIdType.Numeric => _numeric.GetHashCode(),
+                _ => _reference?.GetHashCode() ?? 0
+            };
+            return HashCode.Combine(NamespaceIndex, NodeIdType, identifierHash);
         }
 
         /// <summary>
@@ -324,11 +341,9 @@ namespace TinyUa.Core.Types
 
             return NodeIdType switch
             {
-                NodeIdType.TwoByte => ((byte)Identifier!).CompareTo((byte)other.Identifier!),
-                NodeIdType.FourByte => ((ushort)Identifier!).CompareTo((ushort)other.Identifier!),
-                NodeIdType.Numeric => ((uint)Identifier!).CompareTo((uint)other.Identifier!),
-                NodeIdType.String => string.Compare((string?)Identifier, (string?)other.Identifier, StringComparison.Ordinal),
-                NodeIdType.Guid => ((Guid)Identifier!).CompareTo((Guid)other.Identifier!),
+                NodeIdType.TwoByte or NodeIdType.FourByte or NodeIdType.Numeric => _numeric.CompareTo(other._numeric),
+                NodeIdType.String => string.Compare((string?)_reference, (string?)other._reference, StringComparison.Ordinal),
+                NodeIdType.Guid => ((Guid)_reference!).CompareTo((Guid)other._reference!),
                 _ => 0
             };
         }
@@ -337,7 +352,8 @@ namespace TinyUa.Core.Types
         {
             NodeIdType = other.NodeIdType;
             NamespaceIndex = other.NamespaceIndex;
-            Identifier = other.Identifier;
+            _numeric = other._numeric;
+            _reference = other._reference;
             NamespaceUri = other.NamespaceUri;
             ServerIndex = other.ServerIndex;
         }

@@ -50,10 +50,23 @@ namespace TinyUa.Core.Security
 
         byte[] Padding(int dataSize);
         byte[] Sign(byte[] data);
-        void Verify(byte[] data, byte[] signature);
+
+        /// <summary>
+        /// Verifies the remote signature computed over the concatenation
+        /// header | securityHeader | body, without requiring the caller to materialize it.
+        /// </summary>
+        void Verify(ReadOnlySpan<byte> header, ReadOnlySpan<byte> securityHeader,
+            ReadOnlySpan<byte> body, ReadOnlySpan<byte> signature);
+
         byte[] Encrypt(byte[] data);
-        byte[] Decrypt(byte[] data);
-        byte[] RemovePadding(byte[] data);
+        byte[] Decrypt(ReadOnlySpan<byte> data);
+
+        /// <summary>
+        /// Returns the number of trailing padding bytes (including the padding-size field) in the
+        /// decrypted plaintext, or 0 when the mode does not add padding. Callers slice the
+        /// plaintext instead of allocating an unpadded copy.
+        /// </summary>
+        int GetPaddingSize(ReadOnlySpan<byte> data);
     }
 
     internal class NoneCryptography : ICryptography
@@ -66,10 +79,11 @@ namespace TinyUa.Core.Security
 
         public byte[] Padding(int dataSize) => Array.Empty<byte>();
         public byte[] Sign(byte[] data) => Array.Empty<byte>();
-        public void Verify(byte[] data, byte[] signature) { }
+        public void Verify(ReadOnlySpan<byte> header, ReadOnlySpan<byte> securityHeader,
+            ReadOnlySpan<byte> body, ReadOnlySpan<byte> signature) { }
         public byte[] Encrypt(byte[] data) => data;
-        public byte[] Decrypt(byte[] data) => data;
-        public byte[] RemovePadding(byte[] data) => data;
+        public byte[] Decrypt(ReadOnlySpan<byte> data) => data.ToArray();
+        public int GetPaddingSize(ReadOnlySpan<byte> data) => 0;
     }
 
     internal class NoneSecurityPolicy : SecurityPolicy

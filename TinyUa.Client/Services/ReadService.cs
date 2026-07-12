@@ -145,7 +145,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents a complete OPC UA Read service request.
     /// </summary>
-    public class ReadRequest : IEncodable
+    public class ReadRequest : IServiceRequest
     {
         /// <summary>
         /// Gets or sets the request header for the service call.
@@ -172,7 +172,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents a response from a Read service call.
     /// </summary>
-    public class ReadResponse : IDecodable<ReadResponse>
+    public class ReadResponse : IDecodable<ReadResponse>, IServiceResponse
     {
         /// <summary>
         /// Gets or sets the response header containing the service result.

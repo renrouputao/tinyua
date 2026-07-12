@@ -111,8 +111,9 @@ public class ConcurrencyTests
         var client = new UaClient("opc.tcp://localhost:4840");
         try
         {
+            var registry = GetPrivateField(client, "_subscriptions")!;
             var dict = (Dictionary<double, TaskCompletionSource<Subscription>>)
-                GetPrivateField(client, "_pendingSubscriptionCreates")!;
+                GetPrivateField(registry, "_pendingCreates")!;
             var pendingTcs = new TaskCompletionSource<Subscription>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
             dict[1000.0] = pendingTcs;
@@ -145,8 +146,9 @@ public class ConcurrencyTests
 
         await Assert.ThrowsAsync<ObjectDisposedException>(() => task);
 
+        var registry = GetPrivateField(client, "_subscriptions")!;
         var dict = (Dictionary<double, TaskCompletionSource<Subscription>>)
-            GetPrivateField(client, "_pendingSubscriptionCreates")!;
+            GetPrivateField(registry, "_pendingCreates")!;
         Assert.Empty(dict);
     }
 

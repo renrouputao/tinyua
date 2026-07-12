@@ -151,7 +151,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the CreateSession service request used to create a session with a server.
     /// </summary>
-    public class CreateSessionRequest : IEncodable
+    public class CreateSessionRequest : IServiceRequest
     {
         /// <summary>Gets or sets the service request header.</summary>
         public RequestHeader RequestHeader { get; set; } = new RequestHeader();
@@ -174,7 +174,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the CreateSession service response returned by the server.
     /// </summary>
-    public class CreateSessionResponse : IDecodable<CreateSessionResponse>
+    public class CreateSessionResponse : IDecodable<CreateSessionResponse>, IServiceResponse
     {
         /// <summary>Gets or sets the service response header.</summary>
         public ResponseHeader ResponseHeader { get; set; } = null!;
@@ -351,7 +351,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the ActivateSession service request used to activate an existing session with user credentials.
     /// </summary>
-    public class ActivateSessionRequest : IEncodable
+    public class ActivateSessionRequest : IServiceRequest
     {
         /// <summary>Gets or sets the service request header.</summary>
         public RequestHeader RequestHeader { get; set; } = new RequestHeader();
@@ -374,7 +374,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the ActivateSession service response returned by the server.
     /// </summary>
-    public class ActivateSessionResponse : IDecodable<ActivateSessionResponse>
+    public class ActivateSessionResponse : IDecodable<ActivateSessionResponse>, IServiceResponse
     {
         /// <summary>Gets or sets the service response header.</summary>
         public ResponseHeader ResponseHeader { get; set; } = null!;
@@ -404,7 +404,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the CloseSession service request used to close an active session.
     /// </summary>
-    public class CloseSessionRequest : IEncodable
+    public class CloseSessionRequest : IServiceRequest
     {
         /// <summary>Gets or sets the service request header.</summary>
         public RequestHeader RequestHeader { get; set; } = new RequestHeader();
@@ -427,7 +427,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the CloseSession service response returned by the server.
     /// </summary>
-    public class CloseSessionResponse : IDecodable<CloseSessionResponse>
+    public class CloseSessionResponse : IDecodable<CloseSessionResponse>, IServiceResponse
     {
         /// <summary>Gets or sets the service response header.</summary>
         public ResponseHeader ResponseHeader { get; set; } = new ResponseHeader();

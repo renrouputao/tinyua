@@ -10,7 +10,25 @@ namespace TinyUa.Core.Logging
 
         internal static ILogger? Current => _current.Value;
 
-        internal static void SetCurrentLogger(ILogger? logger) => _current.Value = logger;
+        /// <summary>
+        /// Installs <paramref name="logger"/> as the ambient security-debug logger for the current
+        /// async flow and returns a scope that restores the previous logger when disposed. Use
+        /// <c>using var _ = SecurityDebugLogger.BeginScope(logger);</c> instead of manual
+        /// save/restore — a forgotten restore leaks the logger into unrelated flows.
+        /// </summary>
+        internal static LoggerScope BeginScope(ILogger? logger)
+        {
+            var previous = _current.Value;
+            _current.Value = logger;
+            return new LoggerScope(previous);
+        }
+
+        internal readonly struct LoggerScope : IDisposable
+        {
+            private readonly ILogger? _previous;
+            internal LoggerScope(ILogger? previous) => _previous = previous;
+            public void Dispose() => _current.Value = _previous;
+        }
 
         /// <summary>
         /// Gets whether the current ambient logger has Debug logging enabled. Use this to gate

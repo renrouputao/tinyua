@@ -77,10 +77,14 @@ namespace TinyUa.Core.Binary
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void EnsureCapacity(int count)
         {
-            if (_position + count <= _buffer.Length) return;
-            int newSize = _buffer.Length;
-            while (newSize < _position + count) newSize *= 2;
-            Array.Resize(ref _buffer, newSize);
+            int required = _position + count;
+            if (required <= _buffer.Length) return;
+            if (required < 0 || count < 0)
+                throw new OutOfMemoryException("BinaryEncoder buffer size overflow");
+            // Double in 64-bit space so the loop can't wrap negative and spin forever.
+            long newSize = _buffer.Length;
+            while (newSize < required) newSize *= 2;
+            Array.Resize(ref _buffer, (int)Math.Min(newSize, Array.MaxLength));
         }
 
         /// <summary>

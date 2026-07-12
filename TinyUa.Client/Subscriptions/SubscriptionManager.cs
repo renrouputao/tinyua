@@ -70,21 +70,19 @@ namespace TinyUa.Client.Subscriptions
     }
 
     /// <summary>
-    /// Represents an OPC UA subscription that manages a publish loop and a collection of monitored items.
-    /// Maintains credits, sequence numbers, and forwards notifications to registered handlers.
-    /// Call <see cref="Dispose"/> to stop publishing and release resources.
+    /// Represents an OPC UA subscription: a collection of monitored items plus the dispatch of
+    /// their data change notifications. Publish requests are pumped by the session-level
+    /// <see cref="PublishEngine"/>; StartPublishing/StopPublishing attach and detach this
+    /// subscription from that engine. Call <see cref="Dispose"/> to release resources.
     /// </summary>
     public class Subscription : IDisposable
     {
         private readonly SubscriptionRouter _router;
         private readonly ILogger? _logger;
-        private readonly CancellationTokenSource _cts = new();
         private readonly object _lock = new();
+        private readonly int _maxPublishRequests;
         private int _isDisposed;
         internal volatile bool _running;
-        private Task? _publishTask;
-        private int _credits;
-        private int _maxCredits;
         private volatile uint _lastSequenceNumber;
         private int _publishCount;
         private int _notificationCount;
@@ -106,7 +104,7 @@ namespace TinyUa.Client.Subscriptions
         internal int NotificationCount => _notificationCount;
         internal uint LastSequenceNumber => _lastSequenceNumber;
 
-        internal bool IsPublishing => Volatile.Read(ref _publishTask) != null;
+        internal bool IsPublishing => _running;
         internal bool IsSubscriptionDisposed => Volatile.Read(ref _isDisposed) != 0;
 
         internal Subscription(SubscriptionRouter router, uint subscriptionId,
@@ -119,9 +117,8 @@ namespace TinyUa.Client.Subscriptions
             PublishingInterval = publishingInterval;
             LifetimeCount = lifetimeCount;
             MaxKeepAliveCount = maxKeepAliveCount;
-            _maxCredits = Math.Max(1, maxPublishRequests);
+            _maxPublishRequests = Math.Max(1, maxPublishRequests);
             _running = false;
-            _credits = 0;
             _lastSequenceNumber = 0;
 
             _router?.Register(subscriptionId, this);
@@ -193,171 +190,58 @@ namespace TinyUa.Client.Subscriptions
             }
         }
 
+        /// <summary>Attaches this subscription to the session publish engine. Idempotent.</summary>
         internal void StartPublishing()
         {
             lock (_lock)
             {
                 if (Volatile.Read(ref _isDisposed) != 0) return;
-                if (_publishTask != null)
-                    return;
-
+                if (_running) return;
                 _running = true;
-                _publishTask = Task.Run(() => PublishLoopAsync(_cts.Token), _cts.Token);
             }
+            _router?.Engine.Attach(this, _maxPublishRequests);
         }
 
-        private async Task PublishLoopAsync(CancellationToken ct)
+        /// <summary>Detaches this subscription from the session publish engine. Idempotent.</summary>
+        internal void StopPublishing()
         {
-
-            var shutdownSignal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            ct.Register(() => shutdownSignal.TrySetResult(true));
-
-            try
+            lock (_lock)
             {
-
-                _logger?.LogDebug($"Subscription {SubscriptionId}: filling credit pool ({_maxCredits} credits)");
-                for (int i = 0; i < _maxCredits; i++)
-                {
-                    if (!_running) break;
-                    Interlocked.Increment(ref _credits);
-                    SendOnePublishAsync().Forget(_logger ?? NullLogger.Instance, "SendOnePublishAsync(credit fill)");
-                }
-                _logger?.LogDebug($"Subscription {SubscriptionId}: credit pool filled ({_credits} in flight)");
-
-                while (_running && !ct.IsCancellationRequested)
-                {
-                    try
-                    {
-
-                        var completed = await shutdownSignal.Task.WaitAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
-                        if (completed) break;
-                    }
-                    catch (OperationCanceledException) { break; }
-                    catch (TimeoutException) { }
-
-                    if (!_running || ct.IsCancellationRequested) break;
-
-                    var currentCredits = Volatile.Read(ref _credits);
-                    if (currentCredits <= 0)
-                    {
-                        _logger?.LogDebug($"Subscription {SubscriptionId}: credit pool empty, fallback refill");
-                        for (int i = 0; i < _maxCredits; i++)
-                        {
-                            if (!_running) break;
-                            Interlocked.Increment(ref _credits);
-                            _ = SendOnePublishAsync();
-                        }
-                    }
-                }
+                if (!_running) return;
+                _running = false;
             }
-            catch (OperationCanceledException) { }
-            catch (Exception ex)
-            {
-                _logger?.LogWarning(ex, $"Subscription {SubscriptionId}: publish loop unexpected error");
-            }
-            finally
-            {
-                _logger?.LogDebug($"Subscription {SubscriptionId}: publish loop stopped (notifs={_notificationCount}, publishes={_publishCount})");
-            }
+            _router?.Engine.Detach(this);
         }
 
-        private async Task SendOnePublishAsync()
+        /// <summary>
+        /// Handles a decoded PublishResponse addressed to this subscription: updates the sequence
+        /// number, dispatches notifications or the keep-alive event, and surfaces processing
+        /// errors via <see cref="OnPublishError"/>.
+        /// </summary>
+        internal void HandlePublishResponse(PublishResponse response)
         {
-            if (!_running) return;
-            try
-            {
-                uint seq = _lastSequenceNumber;
-                await _router.SendPublishWithCallbackAsync(SubscriptionId, seq, body => OnPublishResponse(body)).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogDebug(ex, $"Subscription {SubscriptionId}: SendOnePublish failed");
-            }
-        }
-
-        private void OnPublishResponse(byte[] body)
-        {
-
-            Interlocked.Decrement(ref _credits);
             Interlocked.Increment(ref _publishCount);
-
             try
             {
-                var decoder = new BinaryDecoder(body);
-                var response = PublishResponse.Decode(decoder);
+                response.ResponseHeader.ServiceResult.Check();
 
-                if (response.Parameters.SubscriptionId != this.SubscriptionId)
+                var notificationMsg = response.Parameters.NotificationMessage;
+                _lastSequenceNumber = notificationMsg.SequenceNumber;
+
+                if (notificationMsg.NotificationData.Count > 0)
                 {
-                    Subscription? target = null;
-                    _router?.TryGet(response.Parameters.SubscriptionId, out target);
-
-                    if (target != null && target._running)
-                    {
-
-                        target.OnPublishResponseForwarded(body);
-                    }
-                    else
-                    {
-                        _logger?.LogDebug($"Subscription {SubscriptionId}: PublishResponse for unknown/stopped sub {response.Parameters.SubscriptionId}");
-                    }
+                    ProcessNotification(notificationMsg);
                 }
                 else
                 {
-                    ProcessOwnPublishResponse(response);
+                    _logger?.LogDebug($"Subscription {SubscriptionId}: keep-alive (seq={_lastSequenceNumber})");
+                    OnKeepAlive?.Invoke();
                 }
             }
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, $"Subscription {SubscriptionId}: error processing PublishResponse");
                 OnPublishError?.Invoke(ex);
-            }
-
-            if (_running)
-            {
-                int needed = _maxCredits - Volatile.Read(ref _credits);
-                for (int i = 0; i < needed; i++)
-                {
-                    if (!_running) break;
-                    Interlocked.Increment(ref _credits);
-                    SendOnePublishAsync().Forget(_logger ?? NullLogger.Instance, "SendOnePublishAsync(credit fill)");
-                }
-            }
-        }
-
-        private void ProcessOwnPublishResponse(PublishResponse response)
-        {
-
-            response.ResponseHeader.ServiceResult.Check();
-
-            var notificationMsg = response.Parameters.NotificationMessage;
-            _lastSequenceNumber = notificationMsg.SequenceNumber;
-
-            if (notificationMsg.NotificationData.Count > 0)
-            {
-                ProcessNotification(notificationMsg);
-            }
-            else
-            {
-                _logger?.LogDebug($"Subscription {SubscriptionId}: keep-alive (seq={_lastSequenceNumber})");
-                OnKeepAlive?.Invoke();
-            }
-        }
-
-        internal void OnPublishResponseForwarded(byte[] body)
-        {
-            try
-            {
-                var decoder = new BinaryDecoder(body);
-                var response = PublishResponse.Decode(decoder);
-
-                if (response.Parameters.SubscriptionId == this.SubscriptionId)
-                {
-                    ProcessOwnPublishResponse(response);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogWarning(ex, $"Subscription {SubscriptionId}: error processing forwarded PublishResponse");
             }
         }
 
@@ -419,8 +303,9 @@ namespace TinyUa.Client.Subscriptions
 
             lock (_lock)
             {
+                var idsToRemove = new HashSet<uint>(monitoredItemIds);
                 var handlesToRemove = MonitoredItems
-                    .Where(kvp => monitoredItemIds.Contains(kvp.Value.MonitoredItemId))
+                    .Where(kvp => idsToRemove.Contains(kvp.Value.MonitoredItemId))
                     .Select(kvp => kvp.Key)
                     .ToList();
                 foreach (var handle in handlesToRemove)
@@ -444,22 +329,10 @@ namespace TinyUa.Client.Subscriptions
             {
                 _logger?.LogDebug(ex, $"Subscription {SubscriptionId}: DeleteSubscriptions error (ignored)");
             }
-
-            _cts.Dispose();
-        }
-
-        internal void StopPublishing()
-        {
-            lock (_lock)
-            {
-                _running = false;
-                try { _cts.Cancel(); } catch { }
-                _publishTask = null;
-            }
         }
 
         /// <summary>
-        /// Stops the publish loop and releases all resources held by this subscription.
+        /// Stops publishing and releases all resources held by this subscription.
         /// Safe to call multiple times; subsequent calls have no effect.
         /// </summary>
         public void Dispose()
@@ -469,26 +342,6 @@ namespace TinyUa.Client.Subscriptions
             StopPublishing();
 
             _router?.Unregister(SubscriptionId);
-
-            try { _cts.Dispose(); } catch { }
-        }
-    }
-
-    internal static class SubscriptionExtensions
-    {
-        internal static Task<Subscription> CreateSubscriptionAsync(this SubscriptionRouter router, double publishingInterval = 1000.0, bool autoStart = true)
-        {
-            return SubscriptionManager.CreateSubscriptionAsync(router, publishingInterval, autoStart);
-        }
-
-        internal static Task<MonitoredItem> SubscribeAsync(this Subscription subscription, NodeId nodeId, DataChangeHandler? handler = null, uint queueSize = 0)
-        {
-            return subscription.AddMonitoredItemAsync(nodeId, handler, queueSize);
-        }
-
-        internal static Task SubscribeAsync(this Subscription subscription, NodeId[] nodeIds, DataChangeHandler? handler = null, uint queueSize = 0)
-        {
-            return subscription.AddMonitoredItemsAsync(nodeIds, handler, queueSize);
         }
     }
 }

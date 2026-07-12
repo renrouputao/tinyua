@@ -53,7 +53,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the Publish service request used to poll for notifications from the server.
     /// </summary>
-    public class PublishRequest : IEncodable
+    public class PublishRequest : IServiceRequest
     {
         /// <summary>Gets or sets the service request header.</summary>
         public RequestHeader RequestHeader { get; set; } = new RequestHeader();
@@ -206,7 +206,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the Publish service response returned by the server containing notification data.
     /// </summary>
-    public class PublishResponse : IDecodable<PublishResponse>
+    public class PublishResponse : IDecodable<PublishResponse>, IServiceResponse
     {
         /// <summary>Gets or sets the service response header.</summary>
         public ResponseHeader ResponseHeader { get; set; } = new ResponseHeader();

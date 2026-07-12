@@ -24,23 +24,9 @@ namespace TinyUa.Client.Connection
         private readonly SemaphoreSlim _sendLock = new(1, 1);
         private readonly ILogger _logger;
 
-        private static readonly ConcurrentBag<BinaryEncoder> s_encoderPool = new();
+        private static BinaryEncoder RentEncoder() => BinaryEncoderPool.Rent();
 
-        // Encoders whose buffer grew beyond this after a one-off large message are dropped instead
-        // of pooled, so a single huge message doesn't pin a large buffer for the process lifetime.
-        private const int MaxPooledEncoderCapacity = 512 * 1024;
-
-        private static BinaryEncoder RentEncoder()
-        {
-            if (s_encoderPool.TryTake(out var e)) { e.Reset(); return e; }
-            return new BinaryEncoder(4096);
-        }
-
-        private static void ReturnEncoder(BinaryEncoder e)
-        {
-            if (e.Capacity <= MaxPooledEncoderCapacity)
-                s_encoderPool.Add(e);
-        }
+        private static void ReturnEncoder(BinaryEncoder e) => BinaryEncoderPool.Return(e);
 
         private Socket? _socket;
         private NetworkStream? _stream;
@@ -115,7 +101,7 @@ namespace TinyUa.Client.Connection
             finally { if (got) _sendLock.Release(); }
         }
 
-        internal void Disconnect()
+        private void CloseTransport()
         {
             _dead = true;
             _running = false;
@@ -127,7 +113,12 @@ namespace TinyUa.Client.Connection
             _stream = null;
             _socket?.Close();
             _socket = null;
+        }
 
+        /// <summary>Synchronous disconnect for Dispose paths. Does not wait for the receive loop to exit.</summary>
+        internal void Disconnect()
+        {
+            CloseTransport();
             _receiveTask = null;
 
             var toCancel = DrainCallbacksUnderSendLockSync();
@@ -137,20 +128,12 @@ namespace TinyUa.Client.Connection
 
         internal async Task DisconnectAsync()
         {
-            _dead = true;
-            _running = false;
-            _receiveCts?.Cancel();
+            CloseTransport();
 
-            try { _socket?.Shutdown(SocketShutdown.Both); } catch (Exception ex) { _logger.LogDebug(ex, "Socket shutdown (ignored)"); }
-
-            _stream?.Close();
-            _stream = null;
-            _socket?.Close();
-            _socket = null;
-
-            if (_receiveTask != null && !_receiveTask.IsCompleted)
+            var receiveTask = _receiveTask;
+            if (receiveTask != null && !receiveTask.IsCompleted)
             {
-                try { await _receiveTask.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); } catch { }
+                try { await receiveTask.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); } catch { }
             }
             _receiveTask = null;
 
@@ -301,7 +284,12 @@ namespace TinyUa.Client.Connection
 
             var debugEnabled = _logger.IsEnabled(LogLevel.Debug);
             if (debugEnabled)
-                _logger.LogDebug($"Request body ({bodySegment.Count} bytes): {BitConverter.ToString(bodySegment.Array!, bodySegment.Offset, bodySegment.Count).Replace("-", " ")}");
+            {
+                // Cap the hex dump — a full dump of a large body builds a 3x-length string.
+                var dumpLen = Math.Min(bodySegment.Count, 256);
+                var suffix = bodySegment.Count > dumpLen ? $" ... ({bodySegment.Count} bytes total)" : "";
+                _logger.LogDebug($"Request body ({bodySegment.Count} bytes): {BitConverter.ToString(bodySegment.Array!, bodySegment.Offset, dumpLen).Replace("-", " ")}{suffix}");
+            }
 
             var requestId = Interlocked.Increment(ref _requestId);
             var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -360,7 +348,13 @@ namespace TinyUa.Client.Connection
             }
         }
 
-        internal async Task SendRequestNoWait<T>(T request, Action<byte[]>? callback = null, byte[]? messageType = null) where T : IEncodable
+        /// <summary>
+        /// Sends a request without awaiting the response. Completion contract: if this method
+        /// throws synchronously, neither callback fires; if it returns, exactly one of
+        /// <paramref name="callback"/> (response received) or <paramref name="onError"/>
+        /// (request faulted/cancelled, e.g. on disconnect) eventually fires.
+        /// </summary>
+        internal async Task SendRequestNoWait<T>(T request, Action<byte[]>? callback = null, byte[]? messageType = null, Action<Exception>? onError = null) where T : IEncodable
         {
             messageType ??= MessageType.SecureMessage;
 
@@ -369,8 +363,16 @@ namespace TinyUa.Client.Connection
             var bodySegment = enc.GetBuffer();
 
             var requestId = Interlocked.Increment(ref _requestId);
+            var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            await _sendLock.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+            // WaitAsync(TimeSpan) returns false on timeout instead of throwing. Ignoring it would
+            // let us send without the lock AND over-release the semaphore in finally, permanently
+            // breaking send mutual exclusion.
+            if (!await _sendLock.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false))
+            {
+                ReturnEncoder(enc);
+                throw new TimeoutException("Timed out waiting for send lock");
+            }
             try
             {
                 if (_stream == null)
@@ -385,13 +387,6 @@ namespace TinyUa.Client.Connection
                 }
 
                 var message = _connection.MessageToBinary(bodySegment, messageType, (uint)requestId);
-
-                var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-                if (callback != null)
-                {
-                    InvokeCallbackAsync(tcs.Task, callback).Forget(_logger, nameof(InvokeCallbackAsync));
-                }
 
                 if (_dead)
                     throw new SocketException((int)SocketError.ConnectionReset);
@@ -409,14 +404,39 @@ namespace TinyUa.Client.Connection
                 _sendLock.Release();
                 ReturnEncoder(enc);
             }
+
+            // Hook the watcher only after a successful send, so a synchronous failure above never
+            // races a callback. A response that already arrived just completes the awaited task.
+            if (callback != null || onError != null)
+            {
+                InvokeCallbackAsync(tcs.Task, callback, onError).Forget(_logger, nameof(InvokeCallbackAsync));
+            }
         }
 
-        private async Task InvokeCallbackAsync(Task<byte[]> task, Action<byte[]> callback)
+        private async Task InvokeCallbackAsync(Task<byte[]> task, Action<byte[]>? callback, Action<Exception>? onError)
         {
+            byte[] result;
             try
             {
-                var result = await task.ConfigureAwait(false);
-                callback(result);
+                result = await task.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                if (onError != null)
+                {
+                    try { onError(ex); }
+                    catch (Exception cbEx) { _logger.LogError(cbEx, "SendRequestNoWait error callback failed"); }
+                }
+                else
+                {
+                    _logger.LogDebug(ex, "SendRequestNoWait request faulted (no error callback)");
+                }
+                return;
+            }
+
+            try
+            {
+                callback?.Invoke(result);
             }
             catch (Exception ex)
             {
@@ -441,7 +461,8 @@ namespace TinyUa.Client.Connection
             var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             byte[] message;
-            await _sendLock.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+            if (!await _sendLock.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false))
+                throw new TimeoutException("Timed out waiting for send lock");
             try
             {
                 if (!MessageType.Equals(messageType, MessageType.SecureOpen))

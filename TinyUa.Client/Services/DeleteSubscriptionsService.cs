@@ -26,7 +26,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the DeleteSubscriptions service request used to remove subscriptions from the server.
     /// </summary>
-    public class DeleteSubscriptionsRequest : IEncodable
+    public class DeleteSubscriptionsRequest : IServiceRequest
     {
         /// <summary>Gets or sets the service request header.</summary>
         public RequestHeader RequestHeader { get; set; } = new RequestHeader();
@@ -49,7 +49,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the DeleteSubscriptions service response returned by the server.
     /// </summary>
-    public class DeleteSubscriptionsResponse : IDecodable<DeleteSubscriptionsResponse>
+    public class DeleteSubscriptionsResponse : IDecodable<DeleteSubscriptionsResponse>, IServiceResponse
     {
         /// <summary>Gets or sets the service response header.</summary>
         public ResponseHeader ResponseHeader { get; set; } = new ResponseHeader();

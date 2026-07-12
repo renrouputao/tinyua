@@ -437,10 +437,21 @@ namespace TinyUa.Core.Types
     }
 
     /// <summary>
+    /// A message chunk security header (symmetric or asymmetric) that can encode itself.
+    /// Lets the transport treat both header kinds uniformly instead of type-switching on object.
+    /// </summary>
+    public interface ISecurityHeader
+    {
+        /// <summary>Encodes this security header into the given <paramref name="encoder"/>.</summary>
+        /// <param name="encoder">The <see cref="BinaryEncoder"/> to write to.</param>
+        void Encode(BinaryEncoder encoder);
+    }
+
+    /// <summary>
     /// Represents the OPC UA Symmetric Algorithm Security Header that precedes the sequence header in secure message chunks.
     /// Identifies the security token used for encryption and signing.
     /// </summary>
-    public class SymmetricAlgorithmHeader
+    public class SymmetricAlgorithmHeader : ISecurityHeader
     {
         /// <summary>Gets or sets the security token identifier.</summary>
         public uint TokenId { get; set; }
@@ -488,7 +499,7 @@ namespace TinyUa.Core.Types
     /// Represents the OPC UA Asymmetric Algorithm Security Header used during OpenSecureChannel.
     /// Contains the security policy URI and X.509 certificate data for establishing the secure channel.
     /// </summary>
-    public class AsymmetricAlgorithmHeader
+    public class AsymmetricAlgorithmHeader : ISecurityHeader
     {
         /// <summary>Gets or sets the security policy URI (e.g., http://opcfoundation.org/UA/SecurityPolicy#None).</summary>
         public string? SecurityPolicyUri { get; set; }

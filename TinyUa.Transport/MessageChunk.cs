@@ -13,26 +13,12 @@ namespace TinyUa.Transport
 {
     internal class MessageChunk
     {
-        private static readonly System.Collections.Concurrent.ConcurrentBag<BinaryEncoder> s_encoderPool = new();
+        private static BinaryEncoder RentEncoder() => BinaryEncoderPool.Rent();
 
-        // Encoders whose buffer grew beyond this after a one-off large message are dropped instead
-        // of pooled, so a single huge message doesn't pin a large buffer for the process lifetime.
-        private const int MaxPooledEncoderCapacity = 512 * 1024;
-
-        private static BinaryEncoder RentEncoder()
-        {
-            if (s_encoderPool.TryTake(out var e)) { e.Reset(); return e; }
-            return new BinaryEncoder();
-        }
-
-        private static void ReturnEncoder(BinaryEncoder e)
-        {
-            if (e.Capacity <= MaxPooledEncoderCapacity)
-                s_encoderPool.Add(e);
-        }
+        private static void ReturnEncoder(BinaryEncoder e) => BinaryEncoderPool.Return(e);
 
         internal Header MessageHeader { get; set; } = null!;
-        internal object SecurityHeader { get; set; } = null!;
+        internal ISecurityHeader SecurityHeader { get; set; } = null!;
         internal SequenceHeader SequenceHeader { get; set; } = new SequenceHeader();
         internal byte[] Body { get; set; } = Array.Empty<byte>();
         internal ICryptography Cryptography { get; }
@@ -79,7 +65,7 @@ namespace TinyUa.Transport
         internal static MessageChunk FromHeaderAndBody(SecurityPolicy securityPolicy, Header header, BinaryDecoder decoder)
         {
             ICryptography crypto;
-            object securityHeader;
+            ISecurityHeader securityHeader;
 
             if (header.IsSecureMessage || header.IsSecureClose)
             {
@@ -102,42 +88,45 @@ namespace TinyUa.Transport
                 SecurityHeader = securityHeader
             };
 
-            var remaining = decoder.Remaining;
-            if (remaining > 0)
-            {
-                var encryptedData = decoder.ReadBytes(remaining);
-
-                if (crypto.RemoteSignatureSize > 0 && encryptedData.Length >= crypto.RemoteSignatureSize)
-                {
-                    var decrypted = crypto.Decrypt(encryptedData);
-
-                    int sigLen = crypto.RemoteSignatureSize;
-                    var signature = decrypted[^sigLen..];
-                    var plaintext = decrypted[..^sigLen];
-
-                    var headerBytes = EncodeHeaderToBytes(header);
-                    var securityBytes = EncodeSecurityHeaderToBytes(securityHeader);
-                    var signedData = new byte[headerBytes.Length + securityBytes.Length + plaintext.Length];
-                    Buffer.BlockCopy(headerBytes, 0, signedData, 0, headerBytes.Length);
-                    Buffer.BlockCopy(securityBytes, 0, signedData, headerBytes.Length, securityBytes.Length);
-                    Buffer.BlockCopy(plaintext, 0, signedData, headerBytes.Length + securityBytes.Length, plaintext.Length);
-
-                    crypto.Verify(signedData, signature);
-
-                    var unpadded = crypto.RemovePadding(plaintext);
-                    var bodyDecoder = new BinaryDecoder(unpadded);
-                    chunk.SequenceHeader = SequenceHeader.Decode(bodyDecoder);
-                    chunk.Body = bodyDecoder.GetRemainingBytes();
-                }
-                else
-                {
-                    var bodyDecoder = new BinaryDecoder(encryptedData);
-                    chunk.SequenceHeader = SequenceHeader.Decode(bodyDecoder);
-                    chunk.Body = bodyDecoder.GetRemainingBytes();
-                }
-            }
-
+            DecryptInto(chunk, decoder);
             return chunk;
+        }
+
+        /// <summary>
+        /// Decrypts, verifies, and unpads the remaining payload of <paramref name="decoder"/>
+        /// into the chunk's SequenceHeader and Body. This is the single receive-side unprotect
+        /// pipeline, shared by chunk parsing and the client receive loop. The plaintext is
+        /// processed via spans over the decrypted buffer — no signature/unpadded copies.
+        /// </summary>
+        internal static void DecryptInto(MessageChunk chunk, BinaryDecoder decoder)
+        {
+            if (decoder.Remaining <= 0)
+                return;
+
+            var crypto = chunk.Cryptography;
+            if (crypto.RemoteSignatureSize > 0 && decoder.Remaining >= crypto.RemoteSignatureSize)
+            {
+                var decrypted = crypto.Decrypt(decoder.ReadRemainingSpan());
+
+                int sigLen = crypto.RemoteSignatureSize;
+                var plaintext = decrypted.AsSpan(0, decrypted.Length - sigLen);
+                var signature = decrypted.AsSpan(decrypted.Length - sigLen);
+
+                var headerBytes = EncodeHeaderToBytes(chunk.MessageHeader);
+                var securityBytes = EncodeSecurityHeaderToBytes(chunk.SecurityHeader);
+                crypto.Verify(headerBytes, securityBytes, plaintext, signature);
+
+                int padSize = crypto.GetPaddingSize(plaintext);
+                var bodyDecoder = new BinaryDecoder(decrypted, 0, plaintext.Length - padSize);
+                chunk.SequenceHeader = SequenceHeader.Decode(bodyDecoder);
+                chunk.Body = bodyDecoder.GetRemainingBytes();
+            }
+            else
+            {
+                // Unsecured (None / not yet keyed) payload: sequence header + body in the clear.
+                chunk.SequenceHeader = SequenceHeader.Decode(decoder);
+                chunk.Body = decoder.GetRemainingBytes();
+            }
         }
 
         internal byte[] ToBinary()
@@ -177,10 +166,7 @@ namespace TinyUa.Transport
             var bodyEncoder = RentEncoder();
             try
             {
-                if (SecurityHeader is SymmetricAlgorithmHeader sym2)
-                    sym2.Encode(securityEncoder);
-                else if (SecurityHeader is AsymmetricAlgorithmHeader asym)
-                    asym.Encode(securityEncoder);
+                SecurityHeader.Encode(securityEncoder);
                 byte[] securityBytes = securityEncoder.ToByteArray();
 
                 SequenceHeader.Encode(bodyEncoder);
@@ -212,138 +198,21 @@ namespace TinyUa.Transport
                     var signature = Cryptography.Sign(signedData);
 
                     if (SecurityDebugLogger.IsDebugEnabled && SecurityHeader is AsymmetricAlgorithmHeader asymForVerify)
-                    {
-                        try
-                        {
-                            using var senderCert = new X509Certificate2(asymForVerify.SenderCertificate);
-                            using var senderPublicKey = senderCert.GetRSAPublicKey();
-                            if (senderPublicKey != null)
-                            {
-                                var policyUri = asymForVerify.SecurityPolicyUri ?? "";
-                                bool isPss = policyUri.Contains("Aes256");
-                                var sigHash = HashAlgorithmName.SHA256;
-                                var sigPadding = isPss
-                                    ? RSASignaturePadding.Pss
-                                    : RSASignaturePadding.Pkcs1;
-                                bool sigValid = senderPublicKey.VerifyData(
-                                    signedData, signature, sigHash, sigPadding);
-                                SecurityDebugLogger.LogStage("OPN.SelfVerify",
-                                    ("sigValid", sigValid),
-                                    ("senderCertSubject", senderCert.Subject),
-                                    ("senderCertThumbprint", senderCert.Thumbprint),
-                                    ("senderPublicKeySize", senderPublicKey.KeySize),
-                                    ("signedDataLen", signedData.Length),
-                                    ("signatureLen", signature.Length),
-                                    ("sigPadding", isPss ? "Pss" : "Pkcs1"));
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            SecurityDebugLogger.LogStage("OPN.SelfVerify",
-                                ("error", ex.GetType().Name + ": " + ex.Message));
-                        }
-                    }
+                        OpnDiagnostics.SelfVerify(asymForVerify, signedData, signature);
 
                     var plaintextWithSig = new byte[paddedBody.Length + signature.Length];
                     Buffer.BlockCopy(paddedBody, 0, plaintextWithSig, 0, paddedBody.Length);
                     Buffer.BlockCopy(signature, 0, plaintextWithSig, paddedBody.Length, signature.Length);
                     var encrypted = Cryptography.Encrypt(plaintextWithSig);
 
-                    if (SecurityDebugLogger.IsDebugEnabled && SecurityHeader is AsymmetricAlgorithmHeader asymForEnc)
-                    {
-                        try
-                        {
-                            using var localPriv = RSA.Create(2048);
-                            using var localPub = localPriv;
-                            var policyUri = asymForEnc.SecurityPolicyUri ?? "";
-                            bool isPssEnc = policyUri.Contains("Aes256");
-                            var encPadding = isPssEnc
-                                ? RSAEncryptionPadding.OaepSHA256
-                                : RSAEncryptionPadding.OaepSHA1;
-                            int oaepOverhead = isPssEnc ? 66 : 42;
-                            int keyBytes = localPub.KeySize / 8;
-                            int plainBlk = keyBytes - oaepOverhead;
-
-                            int blkCount = (plaintextWithSig.Length + plainBlk - 1) / plainBlk;
-                            var reEncrypted = new byte[blkCount * keyBytes];
-                            var blk = new byte[plainBlk];
-                            for (int i = 0; i < blkCount; i++)
-                            {
-                                int off = i * plainBlk;
-                                int len = Math.Min(plainBlk, plaintextWithSig.Length - off);
-                                Buffer.BlockCopy(plaintextWithSig, off, blk, 0, len);
-                                var enc = len == plainBlk
-                                    ? localPub.Encrypt(blk, encPadding)
-                                    : localPub.Encrypt(blk.AsSpan(0, len).ToArray(), encPadding);
-                                Buffer.BlockCopy(enc, 0, reEncrypted, i * keyBytes, keyBytes);
-                            }
-
-                            using var ms = new System.IO.MemoryStream(blkCount * plainBlk);
-                            var decBlk = new byte[keyBytes];
-                            for (int i = 0; i < blkCount; i++)
-                            {
-                                Buffer.BlockCopy(reEncrypted, i * keyBytes, decBlk, 0, keyBytes);
-                                var dec = localPriv.Decrypt(decBlk, encPadding);
-                                ms.Write(dec, 0, dec.Length);
-                            }
-                            var reDecrypted = ms.ToArray();
-
-                            bool roundTripOk = reDecrypted.Length == plaintextWithSig.Length;
-                            for (int i = 0; i < reDecrypted.Length && roundTripOk; i++)
-                                roundTripOk = reDecrypted[i] == plaintextWithSig[i];
-
-                            SecurityDebugLogger.LogStage("OPN.EncRoundTrip",
-                                ("roundTripOk", roundTripOk),
-                                ("origLen", plaintextWithSig.Length),
-                                ("decryptedLen", reDecrypted.Length),
-                                ("blockCount", blkCount),
-                                ("plainBlk", plainBlk),
-                                ("keyBytes", keyBytes),
-                                ("encPadding", isPssEnc ? "OaepSHA256" : "OaepSHA1"));
-                        }
-                        catch (Exception ex)
-                        {
-                            SecurityDebugLogger.LogStage("OPN.EncRoundTrip",
-                                ("error", ex.GetType().Name + ": " + ex.Message));
-                        }
-                    }
-
                     encoder.WriteBytes(headerBytes);
                     encoder.WriteBytes(securityBytes);
                     encoder.WriteBytes(encrypted);
 
                     if (SecurityDebugLogger.IsDebugEnabled && SecurityHeader is AsymmetricAlgorithmHeader asymForLog)
-                    {
-                        var finalMessage = encoder.ToByteArray();
-                        var uriForLog = asymForLog.SecurityPolicyUri ?? "";
-                        var certForLog = asymForLog.SenderCertificate;
-                        var thumbForLog = asymForLog.ReceiverCertificateThumbprint;
-                        int uriByteLen = System.Text.Encoding.UTF8.GetByteCount(uriForLog);
-                        SecurityDebugLogger.LogStage("OPN.ToBinary",
-                            ("headerLen", headerBytes.Length),
-                            ("securityLen", securityBytes.Length),
-                            ("bodyLen", bodyBytes.Length),
-                            ("paddingLen", padding.Length),
-                            ("sigLen", signature.Length),
-                            ("plainBlockSize", Cryptography.PlainBlockSize),
-                            ("encryptedBlockSize", Cryptography.EncryptedBlockSize),
-                            ("plainSize", plainSize),
-                            ("encryptedSize", encryptedSize),
-                            ("totalMsgLen", finalMessage.Length),
-                            ("messageSizeInHeader", MessageHeader.BodySize + 12),
-                            ("channelIdInHeader", MessageHeader.ChannelId),
-                            ("uriStrLen", uriForLog.Length),
-                            ("uriByteLen", uriByteLen),
-                            ("senderCertLen", certForLog?.Length ?? -1),
-                            ("thumbprintLen", thumbForLog?.Length ?? -1),
-                            ("expectedSecurityLen", 4 + uriByteLen + 4 + (certForLog?.Length ?? 0) + 4 + (thumbForLog?.Length ?? 0)));
-                        SecurityDebugLogger.LogHexDump("OPN.header", headerBytes, 64);
-                        SecurityDebugLogger.LogHexDump("OPN.security", securityBytes, 200);
-                        SecurityDebugLogger.LogHexDump("OPN.senderCert", certForLog, 64);
-                        SecurityDebugLogger.LogHexDump("OPN.thumbprint", thumbForLog, 32);
-                        SecurityDebugLogger.LogHexDump("OPN.padding", padding, 32);
-                        SecurityDebugLogger.LogHexDump("OPN.encryptedFirst256", encrypted, 256);
-                    }
+                        OpnDiagnostics.LogToBinary(asymForLog, MessageHeader, Cryptography,
+                            headerBytes, securityBytes, bodyBytes.Length, padding, signature,
+                            encrypted, plainSize, encryptedSize, encoder.Length);
                 }
                 else
                 {
@@ -384,6 +253,17 @@ namespace TinyUa.Transport
             uint channelId = 1,
             uint requestId = 1,
             uint tokenId = 1)
+            => MessageToChunks(securityPolicy, new ArraySegment<byte>(body), maxChunkSize,
+                messageType, channelId, requestId, tokenId);
+
+        internal static List<MessageChunk> MessageToChunks(
+            SecurityPolicy securityPolicy,
+            ArraySegment<byte> body,
+            int maxChunkSize,
+            byte[]? messageType = null,
+            uint channelId = 1,
+            uint requestId = 1,
+            uint tokenId = 1)
         {
             messageType ??= MessageType.SecureMessage;
             var chunks = new List<MessageChunk>();
@@ -399,7 +279,7 @@ namespace TinyUa.Transport
                         SenderCertificate = securityPolicy.SenderCertificate,
                         ReceiverCertificateThumbprint = securityPolicy.ReceiverThumbprint
                     },
-                    Body = body
+                    Body = SegmentToArray(body)
                 };
                 chunk.MessageHeader.ChannelId = channelId;
                 chunk.SequenceHeader.RequestId = requestId;
@@ -414,9 +294,9 @@ namespace TinyUa.Transport
             var maxSize = MaxBodySize(crypto, Math.Max(maxChunkSize, 8192));
             if (maxSize <= 0) maxSize = MaxBodySize(crypto, 8192);
 
-            if (body.Length <= maxSize)
+            if (body.Count <= maxSize)
             {
-                var chunk = new MessageChunk(securityPolicy, body, messageType, ChunkType.Single);
+                var chunk = new MessageChunk(securityPolicy, SegmentToArray(body), messageType, ChunkType.Single);
                 ((SymmetricAlgorithmHeader)chunk.SecurityHeader).TokenId = tokenId;
                 chunk.MessageHeader.ChannelId = channelId;
                 chunk.SequenceHeader.RequestId = requestId;
@@ -424,14 +304,14 @@ namespace TinyUa.Transport
                 return chunks;
             }
 
-            for (int offset = 0; offset < body.Length; offset += maxSize)
+            for (int offset = 0; offset < body.Count; offset += maxSize)
             {
-                var remaining = body.Length - offset;
+                var remaining = body.Count - offset;
                 var chunkSize = Math.Min(remaining, maxSize);
                 var chunkBody = new byte[chunkSize];
-                Array.Copy(body, offset, chunkBody, 0, chunkSize);
+                Buffer.BlockCopy(body.Array!, body.Offset + offset, chunkBody, 0, chunkSize);
 
-                var isLast = offset + maxSize >= body.Length;
+                var isLast = offset + maxSize >= body.Count;
                 var chunkType = isLast ? ChunkType.Single : ChunkType.Intermediate;
 
                 var chunk = new MessageChunk(securityPolicy, chunkBody, messageType, chunkType);
@@ -441,16 +321,21 @@ namespace TinyUa.Transport
                 chunks.Add(chunk);
             }
 
-            if (chunks.Count == 0)
-            {
-                var chunk = new MessageChunk(securityPolicy, Array.Empty<byte>(), messageType, ChunkType.Single);
-                ((SymmetricAlgorithmHeader)chunk.SecurityHeader).TokenId = tokenId;
-                chunk.MessageHeader.ChannelId = channelId;
-                chunk.SequenceHeader.RequestId = requestId;
-                chunks.Add(chunk);
-            }
-
             return chunks;
+        }
+
+        /// <summary>
+        /// Returns the segment contents as an array, sharing the underlying array when the segment
+        /// covers it entirely. Callers consume the result synchronously (before any pooled buffer
+        /// backing the segment is reused), so sharing is safe.
+        /// </summary>
+        private static byte[] SegmentToArray(ArraySegment<byte> segment)
+        {
+            if (segment.Array == null || segment.Count == 0) return Array.Empty<byte>();
+            if (segment.Offset == 0 && segment.Count == segment.Array.Length) return segment.Array;
+            var copy = new byte[segment.Count];
+            Buffer.BlockCopy(segment.Array, segment.Offset, copy, 0, segment.Count);
+            return copy;
         }
 
         public override string ToString()
@@ -469,17 +354,12 @@ namespace TinyUa.Transport
             finally { ReturnEncoder(enc); }
         }
 
-        internal static byte[] EncodeSecurityHeaderToBytes(object securityHeader)
+        internal static byte[] EncodeSecurityHeaderToBytes(ISecurityHeader securityHeader)
         {
             var enc = RentEncoder();
             try
             {
-                if (securityHeader is SymmetricAlgorithmHeader sym)
-                    sym.Encode(enc);
-                else if (securityHeader is AsymmetricAlgorithmHeader asym)
-                    asym.Encode(enc);
-                else
-                    throw new InvalidOperationException($"Unknown security header type: {securityHeader?.GetType()}");
+                securityHeader.Encode(enc);
                 return enc.ToByteArray();
             }
             finally { ReturnEncoder(enc); }
@@ -489,6 +369,7 @@ namespace TinyUa.Transport
     internal class Message
     {
         private readonly List<MessageChunk> _chunks;
+        private byte[]? _body;
 
         internal Message(List<MessageChunk> chunks)
         {
@@ -498,29 +379,27 @@ namespace TinyUa.Transport
         internal byte[]? MessageType => _chunks.Count > 0 ? _chunks[0].MessageHeader.MessageType : null;
         internal uint RequestId => _chunks.Count > 0 ? _chunks[0].SequenceHeader.RequestId : 0;
         internal SequenceHeader? SequenceHeader => _chunks.Count > 0 ? _chunks[0].SequenceHeader : null;
-        internal object? SecurityHeader => _chunks.Count > 0 ? _chunks[0].SecurityHeader : null;
+        internal ISecurityHeader? SecurityHeader => _chunks.Count > 0 ? _chunks[0].SecurityHeader : null;
 
-        internal byte[] Body
+        internal byte[] Body => _body ??= BuildBody();
+
+        private byte[] BuildBody()
         {
-            get
+            if (_chunks.Count == 1)
+                return _chunks[0].Body;
+
+            var totalSize = 0;
+            foreach (var chunk in _chunks)
+                totalSize += chunk.Body.Length;
+
+            var body = new byte[totalSize];
+            var offset = 0;
+            foreach (var chunk in _chunks)
             {
-
-                if (_chunks.Count == 1)
-                    return _chunks[0].Body;
-
-                var totalSize = 0;
-                foreach (var chunk in _chunks)
-                    totalSize += chunk.Body.Length;
-
-                var body = new byte[totalSize];
-                var offset = 0;
-                foreach (var chunk in _chunks)
-                {
-                    Array.Copy(chunk.Body, 0, body, offset, chunk.Body.Length);
-                    offset += chunk.Body.Length;
-                }
-                return body;
+                Buffer.BlockCopy(chunk.Body, 0, body, offset, chunk.Body.Length);
+                offset += chunk.Body.Length;
             }
+            return body;
         }
 
         public override string ToString()

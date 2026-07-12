@@ -55,9 +55,13 @@ namespace TinyUa.Client.Connection
                 var existing = _subscriptionTemplates.Find(t => t.SubscriptionId == template.SubscriptionId);
                 if (existing != null)
                 {
+                    // Dedup by ClientHandle, not NodeId: the same node may legitimately be
+                    // monitored twice with different handlers/settings, and each monitored item
+                    // gets a unique client handle. Deduping by NodeId silently dropped the second
+                    // handler from the rebuild template.
                     foreach (var item in template.Items)
                     {
-                        if (!existing.Items.Any(i => i.NodeId == item.NodeId))
+                        if (!existing.Items.Any(i => i.ClientHandle == item.ClientHandle))
                             existing.Items.Add(item);
                     }
                 }
@@ -102,20 +106,21 @@ namespace TinyUa.Client.Connection
                 return await pendingTask.ConfigureAwait(false);
             }
 
-            _reconnectCts = new CancellationTokenSource();
+            var reconnectCts = new CancellationTokenSource();
+            lock (_lock)
+                _reconnectCts = reconnectCts;
             ReconnectStarted?.Invoke();
 
-            var previousLogger = SecurityDebugLogger.Current;
-            SecurityDebugLogger.SetCurrentLogger(_logger);
+            using var loggerScope = SecurityDebugLogger.BeginScope(_logger);
             bool success = false;
             try
             {
                 var retries = 0;
-                var delay = _options.ReconnectInitialDelayMs;
+                var backoff = new BackoffPolicy(_options.ReconnectInitialDelayMs, _options.ReconnectMaxDelayMs);
 
                 while (_options.ReconnectMaxRetries < 0 || retries < _options.ReconnectMaxRetries)
                 {
-                    if (_reconnectCts.Token.IsCancellationRequested)
+                    if (reconnectCts.Token.IsCancellationRequested)
                         break;
 
                     try
@@ -143,11 +148,10 @@ namespace TinyUa.Client.Connection
                             return false;
                         }
 
+                        var delay = backoff.NextDelay();
                         ReconnectBackoff?.Invoke(retries, delay);
-                        try { await Task.Delay(delay, _reconnectCts.Token); }
+                        try { await Task.Delay(delay, reconnectCts.Token); }
                         catch (OperationCanceledException) { break; }
-
-                        delay = Math.Min(delay * 2, _options.ReconnectMaxDelayMs);
                     }
                 }
 
@@ -157,12 +161,17 @@ namespace TinyUa.Client.Connection
             finally
             {
                 _reconnecting = false;
-                _reconnectCts?.Dispose();
-                _reconnectCts = null;
+                // Detach the field under the lock so CancelReconnect can never race the dispose:
+                // it either sees this CTS while we still hold it un-disposed, or sees null.
+                lock (_lock)
+                {
+                    if (_reconnectCts == reconnectCts)
+                        _reconnectCts = null;
+                }
+                reconnectCts.Dispose();
                 var tcs = _pendingReconnect;
                 _pendingReconnect = null;
                 tcs?.TrySetResult(success);
-                SecurityDebugLogger.SetCurrentLogger(previousLogger);
             }
         }
 
@@ -247,7 +256,10 @@ namespace TinyUa.Client.Connection
                         {
                             var msg = await _connection.RepublishAsync(tpl.SubscriptionId, seq).ConfigureAwait(false);
 
-                            if (sub != null && sub._running)
+                            // Publishing is stopped during a connection loss, so gate on disposal,
+                            // not on _running — otherwise every republished notification of a
+                            // lossless recovery would be dropped silently.
+                            if (sub != null && !sub.IsSubscriptionDisposed)
                             {
                                 sub.ProcessNotification(msg);
                             }
@@ -300,7 +312,10 @@ namespace TinyUa.Client.Connection
 
         internal void CancelReconnect()
         {
-            try { _reconnectCts?.Cancel(); } catch (ObjectDisposedException) { }
+            lock (_lock)
+            {
+                try { _reconnectCts?.Cancel(); } catch (ObjectDisposedException) { }
+            }
         }
 
         public void Dispose()

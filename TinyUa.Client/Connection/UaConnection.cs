@@ -21,6 +21,7 @@ namespace TinyUa.Client.Connection
         private SecurityPolicy _securityPolicy;
         private NodeId? _sessionId;
         private NodeId? _authenticationToken;
+        private uint _requestHandle;
 
         private byte[]? _serverCertificate;
         private byte[]? _serverNonce;
@@ -83,17 +84,46 @@ namespace TinyUa.Client.Connection
         internal async Task<Acknowledge> SendHelloAsync(string endpointUrl, uint maxMessageSize = 0)
             => await _socket!.SendHelloAsync(endpointUrl, maxMessageSize).ConfigureAwait(false);
 
+        /// <summary>
+        /// Builds a request header with the session token, a monotonically increasing request
+        /// handle, and the given timeout hint. All service calls go through this single factory.
+        /// </summary>
+        internal RequestHeader CreateRequestHeader(uint timeoutHint)
+        {
+            return new RequestHeader
+            {
+                AuthenticationToken = _authenticationToken ?? new NodeId(),
+                Timestamp = DateTime.UtcNow,
+                RequestHandle = Interlocked.Increment(ref _requestHandle),
+                TimeoutHint = timeoutHint
+            };
+        }
+
+        /// <summary>
+        /// Sends a service request with a uniformly populated header, decodes the response, and
+        /// checks the service result. The one entry point for all session-level services.
+        /// </summary>
+        internal async Task<TResponse> InvokeAsync<TRequest, TResponse>(TRequest request)
+            where TRequest : IServiceRequest
+            where TResponse : IDecodable<TResponse>, IServiceResponse
+        {
+            request.RequestHeader = CreateRequestHeader((uint)Math.Max(_timeout, 0));
+            var body = await _socket!.SendRequestAsync(request).ConfigureAwait(false);
+            var decoder = new BinaryDecoder(body);
+            var response = TResponse.Decode(decoder);
+            response.ResponseHeader.ServiceResult.Check();
+            return response;
+        }
+
         internal async Task<EndpointDescription[]?> GetEndpointsAsync(string endpointUrl)
         {
             var request = new GetEndpointsRequest
             {
-                RequestHeader = new RequestHeader { AuthenticationToken = new NodeId() },
                 EndpointUrl = endpointUrl,
                 LocaleIds = null,
                 ProfileUris = null
             };
-            var response = await _socket!.SendRequestAsync<GetEndpointsRequest, GetEndpointsResponse>(request).ConfigureAwait(false);
-            response.ResponseHeader.ServiceResult.Check();
+            var response = await InvokeAsync<GetEndpointsRequest, GetEndpointsResponse>(request).ConfigureAwait(false);
             return response.Endpoints;
         }
 
@@ -128,13 +158,8 @@ namespace TinyUa.Client.Connection
             if (_sessionId == null || _authenticationToken == null) return;
             try
             {
-                var request = new CloseSessionRequest
-                {
-                    RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken },
-                    DeleteSubscriptions = true
-                };
-                var response = await _socket!.SendRequestAsync<CloseSessionRequest, CloseSessionResponse>(request).ConfigureAwait(false);
-                response.ResponseHeader.ServiceResult.Check();
+                var request = new CloseSessionRequest { DeleteSubscriptions = true };
+                await InvokeAsync<CloseSessionRequest, CloseSessionResponse>(request).ConfigureAwait(false);
             }
             catch (Exception ex) { _logger.LogDebug(ex, "CloseSession error (ignored)"); }
             finally { _sessionId = null; _authenticationToken = null; }
@@ -165,8 +190,7 @@ namespace TinyUa.Client.Connection
                     RequestedSessionTimeout = requestedSessionTimeout
                 }
             };
-            var response = await _socket!.SendRequestAsync<CreateSessionRequest, CreateSessionResponse>(request).ConfigureAwait(false);
-            response.ResponseHeader.ServiceResult.Check();
+            var response = await InvokeAsync<CreateSessionRequest, CreateSessionResponse>(request).ConfigureAwait(false);
             _sessionId = response.SessionId;
             _authenticationToken = response.AuthenticationToken;
 
@@ -181,13 +205,8 @@ namespace TinyUa.Client.Connection
             var parameters = new ActivateSessionParameters { UserIdentity = userIdentity };
             ComputeClientSignature(parameters);
 
-            var request = new ActivateSessionRequest
-            {
-                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
-                Parameters = parameters
-            };
-            var response = await _socket!.SendRequestAsync<ActivateSessionRequest, ActivateSessionResponse>(request).ConfigureAwait(false);
-            response.ResponseHeader.ServiceResult.Check();
+            var request = new ActivateSessionRequest { Parameters = parameters };
+            await InvokeAsync<ActivateSessionRequest, ActivateSessionResponse>(request).ConfigureAwait(false);
         }
 
         internal async Task ActivateSessionAsync(NodeId sessionId, NodeId authenticationToken, UserIdentityToken? userIdentity = null)
@@ -197,13 +216,8 @@ namespace TinyUa.Client.Connection
             var parameters = new ActivateSessionParameters { UserIdentity = userIdentity };
             ComputeClientSignature(parameters);
 
-            var request = new ActivateSessionRequest
-            {
-                RequestHeader = new RequestHeader { AuthenticationToken = authenticationToken },
-                Parameters = parameters
-            };
-            var response = await _socket!.SendRequestAsync<ActivateSessionRequest, ActivateSessionResponse>(request).ConfigureAwait(false);
-            response.ResponseHeader.ServiceResult.Check();
+            var request = new ActivateSessionRequest { Parameters = parameters };
+            await InvokeAsync<ActivateSessionRequest, ActivateSessionResponse>(request).ConfigureAwait(false);
         }
 
         private void ComputeClientSignature(ActivateSessionParameters parameters)
@@ -237,11 +251,9 @@ namespace TinyUa.Client.Connection
         {
             var request = new RepublishRequest
             {
-                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
                 Parameters = new RepublishParameters { SubscriptionId = subscriptionId, RetransmitSequenceNumber = sequenceNumber }
             };
-            var response = await _socket!.SendRequestAsync<RepublishRequest, RepublishResponse>(request).ConfigureAwait(false);
-            response.ResponseHeader.ServiceResult.Check();
+            var response = await InvokeAsync<RepublishRequest, RepublishResponse>(request).ConfigureAwait(false);
             return response.NotificationMessage;
         }
 
@@ -249,7 +261,6 @@ namespace TinyUa.Client.Connection
         {
             var request = new BrowseRequest
             {
-                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
                 Parameters = new BrowseParameters
                 {
                     RequestedMaxReferencesPerNode = maxReferences,
@@ -260,8 +271,7 @@ namespace TinyUa.Client.Connection
                     }}
                 }
             };
-            var response = await SendRequestAsync<BrowseRequest, BrowseResponse>(request).ConfigureAwait(false);
-            response.ResponseHeader.ServiceResult.Check();
+            var response = await InvokeAsync<BrowseRequest, BrowseResponse>(request).ConfigureAwait(false);
             return response.Results;
         }
 
@@ -269,12 +279,10 @@ namespace TinyUa.Client.Connection
         {
             var request = new BrowseNextRequest
             {
-                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
                 ReleaseContinuationPoints = false,
                 ContinuationPoints = new[] { continuationPoint }
             };
-            var response = await SendRequestAsync<BrowseNextRequest, BrowseNextResponse>(request).ConfigureAwait(false);
-            response.ResponseHeader.ServiceResult.Check();
+            var response = await InvokeAsync<BrowseNextRequest, BrowseNextResponse>(request).ConfigureAwait(false);
             return response.Results;
         }
 
@@ -282,15 +290,13 @@ namespace TinyUa.Client.Connection
         {
             var request = new ReadRequest
             {
-                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
                 Parameters = new ReadParameters
                 {
                     MaxAge = 0, TimestampsToReturn = TimestampsToReturn.Both,
                     NodesToRead = new[] { new ReadValueId { NodeId = nodeId, AttributeId = attributeId } }
                 }
             };
-            var response = await _socket!.SendRequestAsync<ReadRequest, ReadResponse>(request).ConfigureAwait(false);
-            response.ResponseHeader.ServiceResult.Check();
+            var response = await InvokeAsync<ReadRequest, ReadResponse>(request).ConfigureAwait(false);
             return response.Results;
         }
 
@@ -302,11 +308,9 @@ namespace TinyUa.Client.Connection
 
             var request = new ReadRequest
             {
-                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
                 Parameters = new ReadParameters { MaxAge = 0, TimestampsToReturn = TimestampsToReturn.Both, NodesToRead = nodesToRead }
             };
-            var response = await _socket!.SendRequestAsync<ReadRequest, ReadResponse>(request).ConfigureAwait(false);
-            response.ResponseHeader.ServiceResult.Check();
+            var response = await InvokeAsync<ReadRequest, ReadResponse>(request).ConfigureAwait(false);
 
             var results = new ReadResult[nodeIds.Length];
             for (int i = 0; i < nodeIds.Length; i++)
@@ -335,11 +339,9 @@ namespace TinyUa.Client.Connection
         {
             var request = new WriteRequest
             {
-                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
                 Parameters = new WriteParameters { NodesToWrite = nodesToWrite }
             };
-            var response = await _socket!.SendRequestAsync<WriteRequest, WriteResponse>(request).ConfigureAwait(false);
-            response.ResponseHeader.ServiceResult.Check();
+            var response = await InvokeAsync<WriteRequest, WriteResponse>(request).ConfigureAwait(false);
 
             var results = new WriteResult[nodesToWrite.Length];
             for (int i = 0; i < nodesToWrite.Length; i++)
@@ -355,8 +357,8 @@ namespace TinyUa.Client.Connection
             return TResponse.Decode(decoder);
         }
 
-        internal Task SendRequestNoWaitAsync<T>(T request, Action<byte[]>? callback = null) where T : IEncodable
-            => _socket!.SendRequestNoWait(request, callback);
+        internal Task SendRequestNoWaitAsync<T>(T request, Action<byte[]>? callback = null, Action<Exception>? onError = null) where T : IEncodable
+            => _socket!.SendRequestNoWait(request, callback, null, onError);
 
         internal byte[] PrepareEncodedReadRequest(NodeId[] nodeIds, AttributeId attributeId = AttributeId.Value)
         {
@@ -365,7 +367,7 @@ namespace TinyUa.Client.Connection
                 nodesToRead[i] = new ReadValueId { NodeId = nodeIds[i], AttributeId = attributeId };
             var request = new ReadRequest
             {
-                RequestHeader = new RequestHeader { AuthenticationToken = _authenticationToken ?? new NodeId() },
+                RequestHeader = CreateRequestHeader((uint)Math.Max(_timeout, 0)),
                 Parameters = new ReadParameters { MaxAge = 0, TimestampsToReturn = TimestampsToReturn.Both, NodesToRead = nodesToRead }
             };
             var enc = new BinaryEncoder(4096);

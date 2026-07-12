@@ -30,7 +30,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the Republish service request used to request retransmission of previously published notifications.
     /// </summary>
-    public class RepublishRequest : IEncodable
+    public class RepublishRequest : IServiceRequest
     {
         /// <summary>Gets or sets the service request header.</summary>
         public RequestHeader RequestHeader { get; set; } = new RequestHeader();
@@ -53,7 +53,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the Republish service response returned by the server containing the retransmitted notification.
     /// </summary>
-    public class RepublishResponse : IDecodable<RepublishResponse>
+    public class RepublishResponse : IDecodable<RepublishResponse>, IServiceResponse
     {
         /// <summary>Gets or sets the service response header.</summary>
         public ResponseHeader ResponseHeader { get; set; } = new ResponseHeader();

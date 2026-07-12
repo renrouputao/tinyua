@@ -7,7 +7,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the CloseSecureChannel service request used to close an active secure channel.
     /// </summary>
-    public class CloseSecureChannelRequest : IEncodable
+    public class CloseSecureChannelRequest : IServiceRequest
     {
         /// <summary>Gets or sets the service request header.</summary>
         public RequestHeader RequestHeader { get; set; } = new RequestHeader();

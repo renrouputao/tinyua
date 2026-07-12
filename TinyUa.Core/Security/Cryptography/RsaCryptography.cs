@@ -54,15 +54,23 @@ namespace TinyUa.Core.Security.Cryptography
             return padding;
         }
 
-        public byte[] RemovePadding(byte[] data)
+        public int GetPaddingSize(ReadOnlySpan<byte> data)
         {
             if (_localKeySize > 256)
             {
+                if (data.Length < 2)
+                    throw new CryptographicException("Invalid padding: data too short.");
                 int padSize = (data[^2] | (data[^1] << 8)) + 2;
-                return data[..^padSize];
+                if (padSize > data.Length)
+                    throw new CryptographicException($"Invalid padding length {padSize} for {data.Length} bytes.");
+                return padSize;
             }
+            if (data.Length < 1)
+                throw new CryptographicException("Invalid padding: data too short.");
             int pad = data[^1] + 1;
-            return data[..^pad];
+            if (pad > data.Length)
+                throw new CryptographicException($"Invalid padding length {pad} for {data.Length} bytes.");
+            return pad;
         }
 
         public byte[] Encrypt(byte[] data)
@@ -87,18 +95,16 @@ namespace TinyUa.Core.Security.Cryptography
             return result;
         }
 
-        public byte[] Decrypt(byte[] data)
+        public byte[] Decrypt(ReadOnlySpan<byte> data)
         {
             if (data.Length == _localKeySize)
                 return _localPrivateKey.Decrypt(data, _encryptionPadding);
 
             int blockCount = data.Length / _localKeySize;
             using var ms = new System.IO.MemoryStream(blockCount * (_localKeySize - _oaepOverhead));
-            var block = new byte[_localKeySize];
             for (int i = 0; i < blockCount; i++)
             {
-                Buffer.BlockCopy(data, i * _localKeySize, block, 0, _localKeySize);
-                var dec = _localPrivateKey.Decrypt(block, _encryptionPadding);
+                var dec = _localPrivateKey.Decrypt(data.Slice(i * _localKeySize, _localKeySize), _encryptionPadding);
                 ms.Write(dec, 0, dec.Length);
             }
             return ms.ToArray();
@@ -107,8 +113,15 @@ namespace TinyUa.Core.Security.Cryptography
         public byte[] Sign(byte[] data)
             => _localPrivateKey.SignData(data, _signatureHash, _signaturePadding);
 
-        public void Verify(byte[] data, byte[] signature)
+        public void Verify(ReadOnlySpan<byte> header, ReadOnlySpan<byte> securityHeader,
+            ReadOnlySpan<byte> body, ReadOnlySpan<byte> signature)
         {
+            // Asymmetric verify runs once per handshake — materializing the signed data here
+            // is not a hot-path concern.
+            var data = new byte[header.Length + securityHeader.Length + body.Length];
+            header.CopyTo(data);
+            securityHeader.CopyTo(data.AsSpan(header.Length));
+            body.CopyTo(data.AsSpan(header.Length + securityHeader.Length));
             if (!_remotePublicKey.VerifyData(data, signature, _signatureHash, _signaturePadding))
                 throw new CryptographicException("Asymmetric signature verification failed.");
         }

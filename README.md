@@ -161,8 +161,6 @@ using TinyUa.Core.Types;
 // Batch write — each result carries its NodeId and StatusCode
 await using var client = await UaClient
     .ConnectTo("opc.tcp://myserver:4840")
-    .WithAppName("MyApp")
-    .WithSecurity("Basic256Sha256")
     .BuildAndRunAsync();
 
 var writeResults = await client.WriteAsync(new WriteValue[]

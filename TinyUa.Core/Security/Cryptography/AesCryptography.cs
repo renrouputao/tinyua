@@ -11,12 +11,31 @@ namespace TinyUa.Core.Security.Cryptography
         private readonly bool _isEncrypted;
 
         private byte[]? _localSigKey;
-        private byte[]? _localEncKey;
-        private byte[]? _localIv;
-
         private byte[]? _remoteSigKey;
-        private byte[]? _remoteEncKey;
-        private byte[]? _remoteIv;
+
+        // (Aes, IV) pairs are swapped as one reference on rekey so a concurrent one-shot
+        // Encrypt/Decrypt never observes a new key paired with an old IV. The previous instance
+        // is retired (disposed) on the NEXT rekey rather than immediately, giving any in-flight
+        // operation a full token lifetime to complete.
+        private volatile CipherState? _localCipher;
+        private volatile CipherState? _remoteCipher;
+        private CipherState? _localCipherRetired;
+        private CipherState? _remoteCipherRetired;
+
+        private sealed class CipherState : IDisposable
+        {
+            internal readonly Aes Aes;
+            internal readonly byte[] Iv;
+
+            internal CipherState(byte[] key, byte[] iv)
+            {
+                Aes = Aes.Create();
+                Aes.Key = key;
+                Iv = iv;
+            }
+
+            public void Dispose() => Aes.Dispose();
+        }
 
         internal AesCryptography(int signatureKeySize, int encryptionKeySize, int blockSize, MessageSecurityMode mode)
         {
@@ -37,15 +56,22 @@ namespace TinyUa.Core.Security.Cryptography
             int total = _signatureKeySize + _encryptionKeySize + _blockSize;
             var derived = PSha256.Derive(secret!, seed!, total);
             _localSigKey = derived[.._signatureKeySize];
-            _localEncKey = derived[_signatureKeySize..(_signatureKeySize + _encryptionKeySize)];
-            _localIv = derived[(_signatureKeySize + _encryptionKeySize)..];
+            var encKey = derived[_signatureKeySize..(_signatureKeySize + _encryptionKeySize)];
+            var iv = derived[(_signatureKeySize + _encryptionKeySize)..];
+
+            if (_isEncrypted)
+            {
+                _localCipherRetired?.Dispose();
+                _localCipherRetired = _localCipher;
+                _localCipher = new CipherState(encKey, iv);
+            }
 
             SecurityDebugLogger.LogStage("AesCryptography.MakeLocalKeys",
                 ("secretLen", secret?.Length ?? -1),
                 ("seedLen", seed?.Length ?? -1),
                 ("sigKeyPrefix", Hex8(_localSigKey)),
-                ("encKeyPrefix", Hex8(_localEncKey)),
-                ("ivPrefix", Hex8(_localIv)),
+                ("encKeyPrefix", Hex8(encKey)),
+                ("ivPrefix", Hex8(iv)),
                 ("isEncrypted", _isEncrypted));
         }
 
@@ -54,15 +80,22 @@ namespace TinyUa.Core.Security.Cryptography
             int total = _signatureKeySize + _encryptionKeySize + _blockSize;
             var derived = PSha256.Derive(secret!, seed!, total);
             _remoteSigKey = derived[.._signatureKeySize];
-            _remoteEncKey = derived[_signatureKeySize..(_signatureKeySize + _encryptionKeySize)];
-            _remoteIv = derived[(_signatureKeySize + _encryptionKeySize)..];
+            var encKey = derived[_signatureKeySize..(_signatureKeySize + _encryptionKeySize)];
+            var iv = derived[(_signatureKeySize + _encryptionKeySize)..];
+
+            if (_isEncrypted)
+            {
+                _remoteCipherRetired?.Dispose();
+                _remoteCipherRetired = _remoteCipher;
+                _remoteCipher = new CipherState(encKey, iv);
+            }
 
             SecurityDebugLogger.LogStage("AesCryptography.MakeRemoteKeys",
                 ("secretLen", secret?.Length ?? -1),
                 ("seedLen", seed?.Length ?? -1),
                 ("sigKeyPrefix", Hex8(_remoteSigKey)),
-                ("encKeyPrefix", Hex8(_remoteEncKey)),
-                ("ivPrefix", Hex8(_remoteIv)),
+                ("encKeyPrefix", Hex8(encKey)),
+                ("ivPrefix", Hex8(iv)),
                 ("isEncrypted", _isEncrypted));
         }
 
@@ -92,10 +125,10 @@ namespace TinyUa.Core.Security.Cryptography
             return padding;
         }
 
-        public byte[] RemovePadding(byte[] data)
+        public int GetPaddingSize(ReadOnlySpan<byte> data)
         {
             if (!_isEncrypted)
-                return data;
+                return 0;
 
             if (_blockSize > 256)
             {
@@ -104,22 +137,28 @@ namespace TinyUa.Core.Security.Cryptography
                 int padSize = (data[^2] | (data[^1] << 8)) + 2;
                 if (padSize > data.Length)
                     throw new CryptographicException($"Invalid padding length {padSize} for {data.Length} bytes.");
-                return data[..^padSize];
+                return padSize;
             }
             if (data.Length < 1)
                 throw new CryptographicException("Invalid padding: data too short.");
             int pad = data[^1] + 1;
             if (pad > data.Length)
                 throw new CryptographicException($"Invalid padding length {pad} for {data.Length} bytes.");
-            return data[..^pad];
+            return pad;
         }
 
         public byte[] Sign(byte[] data)
             => HMACSHA256.HashData(_localSigKey!, data);
 
-        public void Verify(byte[] data, byte[] signature)
+        public void Verify(ReadOnlySpan<byte> header, ReadOnlySpan<byte> securityHeader,
+            ReadOnlySpan<byte> body, ReadOnlySpan<byte> signature)
         {
-            var expected = HMACSHA256.HashData(_remoteSigKey!, data);
+            using var hmac = IncrementalHash.CreateHMAC(HashAlgorithmName.SHA256, _remoteSigKey!);
+            hmac.AppendData(header);
+            hmac.AppendData(securityHeader);
+            hmac.AppendData(body);
+            Span<byte> expected = stackalloc byte[32];
+            hmac.GetHashAndReset(expected);
             if (!CryptographicOperations.FixedTimeEquals(expected, signature))
                 throw new CryptographicException("Symmetric signature verification failed.");
         }
@@ -129,27 +168,19 @@ namespace TinyUa.Core.Security.Cryptography
             if (!_isEncrypted)
                 return data;
 
-            using var aes = Aes.Create();
-            aes.Key = _localEncKey!;
-            aes.IV = _localIv!;
-            aes.Mode = CipherMode.CBC;
-            aes.Padding = PaddingMode.None;
-            using var enc = aes.CreateEncryptor();
-            return enc.TransformFinalBlock(data, 0, data.Length);
+            var cipher = _localCipher
+                ?? throw new CryptographicException("Local symmetric key not initialized.");
+            return cipher.Aes.EncryptCbc(data, cipher.Iv, PaddingMode.None);
         }
 
-        public byte[] Decrypt(byte[] data)
+        public byte[] Decrypt(ReadOnlySpan<byte> data)
         {
             if (!_isEncrypted)
-                return data;
+                return data.ToArray();
 
-            using var aes = Aes.Create();
-            aes.Key = _remoteEncKey!;
-            aes.IV = _remoteIv!;
-            aes.Mode = CipherMode.CBC;
-            aes.Padding = PaddingMode.None;
-            using var dec = aes.CreateDecryptor();
-            return dec.TransformFinalBlock(data, 0, data.Length);
+            var cipher = _remoteCipher
+                ?? throw new CryptographicException("Remote symmetric key not initialized.");
+            return cipher.Aes.DecryptCbc(data, cipher.Iv, PaddingMode.None);
         }
     }
 }

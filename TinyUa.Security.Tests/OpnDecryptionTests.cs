@@ -117,8 +117,7 @@ public sealed class OpnDecryptionTests
         {
             _output.WriteLine($"[TinyUa {level}] {msg}" + (ex != null ? $" | {ex.GetType().Name}: {ex.Message}" : ""));
         }, LogLevel.Debug);
-        var previousLogger = SecurityDebugLogger.Current;
-        SecurityDebugLogger.SetCurrentLogger(logger);
+        using var loggerScope = SecurityDebugLogger.BeginScope(logger);
         try
         {
             var chunks = MessageChunk.MessageToChunks(
@@ -305,7 +304,7 @@ public sealed class OpnDecryptionTests
         }
         finally
         {
-            SecurityDebugLogger.SetCurrentLogger(previousLogger);
+            // Ambient logger restored by loggerScope disposal.
         }
 
         await Task.CompletedTask; // keep async signature for fixture-friendly xUnit lifecycle

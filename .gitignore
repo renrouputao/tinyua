@@ -46,3 +46,4 @@ dotnet-tools.json
 
 # ── Temporary tools ──
 tools/
+docs/

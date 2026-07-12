@@ -12,29 +12,31 @@ namespace TinyUa.Client.Subscriptions
     internal class SubscriptionRouter
     {
         private readonly UaConnection _connection;
+        private readonly ConcurrentDictionary<uint, Subscription> _registry = new();
 
-        internal ConcurrentDictionary<uint, Subscription> Registry { get; } = new();
+        /// <summary>The session-level publish pump shared by all subscriptions on this connection.</summary>
+        internal PublishEngine Engine { get; }
 
-        internal SubscriptionRouter(UaConnection connection)
+        internal SubscriptionRouter(UaConnection connection, TinyUa.Core.Logging.ILogger? logger = null)
         {
             _connection = connection ?? throw new ArgumentNullException(nameof(connection));
+            Engine = new PublishEngine(this, logger ?? TinyUa.Core.Logging.NullLogger.Instance);
         }
 
         internal void Register(uint subscriptionId, Subscription subscription)
-            => Registry[subscriptionId] = subscription;
+            => _registry[subscriptionId] = subscription;
 
         internal void Unregister(uint subscriptionId)
-            => Registry.TryRemove(subscriptionId, out _);
+            => _registry.TryRemove(subscriptionId, out _);
 
         internal bool TryGet(uint subscriptionId, out Subscription? subscription)
-            => Registry.TryGetValue(subscriptionId, out subscription);
+            => _registry.TryGetValue(subscriptionId, out subscription);
 
         internal async Task<CreateSubscriptionResponse> CreateSubscriptionAsync(double publishingInterval = 1000.0,
             uint lifetimeCount = 3600, uint maxKeepAliveCount = 10)
         {
             var request = new CreateSubscriptionRequest
             {
-                RequestHeader = new RequestHeader { AuthenticationToken = _connection.AuthenticationToken ?? new NodeId() },
                 Parameters = new CreateSubscriptionParameters
                 {
                     RequestedPublishingInterval = publishingInterval,
@@ -43,9 +45,7 @@ namespace TinyUa.Client.Subscriptions
                     PublishingEnabled = true
                 }
             };
-            var response = await _connection.SendRequestAsync<CreateSubscriptionRequest, CreateSubscriptionResponse>(request).ConfigureAwait(false);
-            response.ResponseHeader.ServiceResult.Check();
-            return response;
+            return await _connection.InvokeAsync<CreateSubscriptionRequest, CreateSubscriptionResponse>(request).ConfigureAwait(false);
         }
 
         internal async Task<MonitoredItemCreateResult[]?> CreateMonitoredItemsAsync(uint subscriptionId, NodeId[] nodeIds,
@@ -68,14 +68,12 @@ namespace TinyUa.Client.Subscriptions
             }
             var request = new CreateMonitoredItemsRequest
             {
-                RequestHeader = new RequestHeader { AuthenticationToken = _connection.AuthenticationToken ?? new NodeId() },
                 Parameters = new CreateMonitoredItemsParameters
                 {
                     SubscriptionId = subscriptionId, TimestampsToReturn = TimestampsToReturn.Both, ItemsToCreate = items
                 }
             };
-            var response = await _connection.SendRequestAsync<CreateMonitoredItemsRequest, CreateMonitoredItemsResponse>(request).ConfigureAwait(false);
-            response.ResponseHeader.ServiceResult.Check();
+            var response = await _connection.InvokeAsync<CreateMonitoredItemsRequest, CreateMonitoredItemsResponse>(request).ConfigureAwait(false);
             return response.Results;
         }
 
@@ -83,12 +81,10 @@ namespace TinyUa.Client.Subscriptions
         {
             var request = new DeleteMonitoredItemsRequest
             {
-                RequestHeader = new RequestHeader { AuthenticationToken = _connection.AuthenticationToken ?? new NodeId() },
                 Parameters = new DeleteMonitoredItemsParameters { SubscriptionId = subscriptionId, MonitoredItemIds = monitoredItemIds }
             };
 
-            var response = await _connection.SendRequestAsync<DeleteMonitoredItemsRequest, DeleteMonitoredItemsResponse>(request).ConfigureAwait(false);
-            response.ResponseHeader.ServiceResult.Check();
+            var response = await _connection.InvokeAsync<DeleteMonitoredItemsRequest, DeleteMonitoredItemsResponse>(request).ConfigureAwait(false);
             return response.Results;
         }
 
@@ -96,44 +92,28 @@ namespace TinyUa.Client.Subscriptions
         {
             var request = new DeleteSubscriptionsRequest
             {
-                RequestHeader = new RequestHeader { AuthenticationToken = _connection.AuthenticationToken ?? new NodeId() },
                 Parameters = new DeleteSubscriptionsParameters { SubscriptionIds = subscriptionIds }
             };
-            var response = await _connection.SendRequestAsync<DeleteSubscriptionsRequest, DeleteSubscriptionsResponse>(request).ConfigureAwait(false);
-            response.ResponseHeader.ServiceResult.Check();
+            var response = await _connection.InvokeAsync<DeleteSubscriptionsRequest, DeleteSubscriptionsResponse>(request).ConfigureAwait(false);
             return response.Results;
         }
 
-        internal async Task<PublishResponse> PublishAsync(uint subscriptionId, uint sequenceNumber = 0)
+        /// <summary>
+        /// Sends one Publish request for the session (fire-and-forget). Per the underlying
+        /// SendRequestNoWait contract: a synchronous throw means neither callback fires;
+        /// otherwise exactly one of <paramref name="onResponse"/> / <paramref name="onError"/>
+        /// eventually fires.
+        /// </summary>
+        internal Task SendPublishAsync(SubscriptionAcknowledgement[] acknowledgements,
+            Action<byte[]> onResponse, Action<Exception> onError)
         {
-            var request = CreatePublishRequest(subscriptionId, sequenceNumber);
-            return await _connection.SendRequestAsync<PublishRequest, PublishResponse>(request).ConfigureAwait(false);
-        }
-
-        internal async Task SendPublishNoWaitAsync(uint subscriptionId, uint sequenceNumber = 0)
-        {
-            var request = CreatePublishRequest(subscriptionId, sequenceNumber);
-            await _connection.SendRequestNoWaitAsync(request).ConfigureAwait(false);
-        }
-
-        internal async Task SendPublishWithCallbackAsync(uint subscriptionId, uint sequenceNumber, Action<byte[]> callback)
-        {
-            var request = CreatePublishRequest(subscriptionId, sequenceNumber);
-            await _connection.SendRequestNoWaitAsync(request, callback).ConfigureAwait(false);
-        }
-
-        private PublishRequest CreatePublishRequest(uint subscriptionId, uint sequenceNumber)
-        {
-            return new PublishRequest
+            var request = new PublishRequest
             {
-                RequestHeader = new RequestHeader { AuthenticationToken = _connection.AuthenticationToken ?? new NodeId(), TimeoutHint = 0 },
-                Parameters = new PublishParameters
-                {
-                    SubscriptionAcknowledgements = sequenceNumber > 0
-                        ? new[] { new SubscriptionAcknowledgement { SubscriptionId = subscriptionId, SequenceNumber = sequenceNumber } }
-                        : Array.Empty<SubscriptionAcknowledgement>()
-                }
+                // TimeoutHint 0: Publish is a long poll — the server holds it until data is due.
+                RequestHeader = _connection.CreateRequestHeader(timeoutHint: 0),
+                Parameters = new PublishParameters { SubscriptionAcknowledgements = acknowledgements }
             };
+            return _connection.SendRequestNoWaitAsync(request, onResponse, onError);
         }
     }
 }

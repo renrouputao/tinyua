@@ -30,7 +30,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the DeleteMonitoredItems service request used to remove monitored items from a subscription.
     /// </summary>
-    public class DeleteMonitoredItemsRequest : IEncodable
+    public class DeleteMonitoredItemsRequest : IServiceRequest
     {
         /// <summary>Gets or sets the service request header.</summary>
         public RequestHeader RequestHeader { get; set; } = new RequestHeader();
@@ -53,7 +53,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the DeleteMonitoredItems service response returned by the server.
     /// </summary>
-    public class DeleteMonitoredItemsResponse : IDecodable<DeleteMonitoredItemsResponse>
+    public class DeleteMonitoredItemsResponse : IDecodable<DeleteMonitoredItemsResponse>, IServiceResponse
     {
         /// <summary>Gets or sets the service response header.</summary>
         public ResponseHeader ResponseHeader { get; set; } = new ResponseHeader();

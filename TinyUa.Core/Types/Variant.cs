@@ -257,7 +257,8 @@ namespace TinyUa.Core.Types
         }
 
         /// <summary>
-        /// Gets a null variant singleton.
+        /// Gets a new null variant. (Not a shared singleton — Variant carries mutable array
+        /// metadata, so each caller gets its own instance.)
         /// </summary>
         public static Variant Null => new Variant();
     }

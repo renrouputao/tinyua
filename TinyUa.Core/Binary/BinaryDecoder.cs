@@ -289,7 +289,20 @@ namespace TinyUa.Core.Binary
         /// <returns>An array of decoded elements, or an empty array if length is zero or negative.</returns>
         public T[] ReadArray<T>(BinaryDecoderDelegate<T> readElement)
         {
-            return ReadArray(new Func<T>(() => readElement(this)));
+            var length = ReadInt32();
+            if (length <= 0)
+                return Array.Empty<T>();
+
+            if (length > Remaining)
+                throw new InvalidOperationException(
+                    $"Array length {length} exceeds remaining buffer ({Remaining} bytes)");
+
+            var result = new T[length];
+            for (int i = 0; i < length; i++)
+            {
+                result[i] = readElement(this);
+            }
+            return result;
         }
 
         /// <summary>
@@ -311,6 +324,18 @@ namespace TinyUa.Core.Binary
         public byte[] GetRemainingBytes()
         {
             return ReadBytes(Remaining);
+        }
+
+        /// <summary>
+        /// Returns a span over all remaining bytes of the underlying buffer without copying, and
+        /// advances the read position to the end. The span is only valid while the underlying
+        /// buffer is alive and unmodified.
+        /// </summary>
+        public ReadOnlySpan<byte> ReadRemainingSpan()
+        {
+            var span = _data.AsSpan(_offset + _position, Remaining);
+            _position = _count;
+            return span;
         }
 
         /// <summary>

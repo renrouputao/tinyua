@@ -114,7 +114,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the GetEndpoints service request used to discover available server endpoints.
     /// </summary>
-    public class GetEndpointsRequest : IEncodable
+    public class GetEndpointsRequest : IServiceRequest
     {
         /// <summary>Gets or sets the service request header.</summary>
         public RequestHeader RequestHeader { get; set; } = new RequestHeader();
@@ -161,7 +161,7 @@ namespace TinyUa.Client.Services
     /// <summary>
     /// Represents the GetEndpoints service response returned by the server.
     /// </summary>
-    public class GetEndpointsResponse : IDecodable<GetEndpointsResponse>
+    public class GetEndpointsResponse : IDecodable<GetEndpointsResponse>, IServiceResponse
     {
         /// <summary>Gets or sets the service response header.</summary>
         public ResponseHeader ResponseHeader { get; set; } = null!;

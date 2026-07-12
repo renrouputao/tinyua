@@ -1,18 +1,12 @@
 using TinyUa.Core;
 using System;
-using System.Linq;
-using System.Security.Cryptography;
-using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
 using TinyUa.Core.Logging;
 using TinyUa.Core.Types;
-using TinyUa.Transport;
 using TinyUa.Client.Services;
 using TinyUa.Client.Connection;
 using TinyUa.Client.Subscriptions;
-using TinyUa.Core.Security;
-using TinyUa.Core.Security.Certificates;
 
 namespace TinyUa.Client
 {
@@ -36,39 +30,44 @@ namespace TinyUa.Client
     /// All operations (Read/Write/Browse/Subscribe) include automatic reconnect and timeout handling.
     /// Implements <see cref="IAsyncDisposable"/> — use <c>await using var client = ...</c> for proper cleanup.
     /// </summary>
-    public class UaClient : IAsyncDisposable
+    /// <remarks>
+    /// This type is a facade: the connect handshake lives in <c>ConnectionOrchestrator</c>,
+    /// lifecycle state in <c>ClientStateMachine</c>, subscription bookkeeping in
+    /// <c>SubscriptionRegistry</c>, and reconnect logic in <c>ReconnectEngine</c>.
+    /// </remarks>
+    public partial class UaClient : IAsyncDisposable
     {
         private readonly UaConnection _client;
         private readonly SubscriptionRouter _subscriptionRouter;
+        private readonly ConnectionOrchestrator _orchestrator;
+        private readonly ClientStateMachine _stateMachine = new();
+        private readonly SubscriptionRegistry _subscriptions = new();
         private readonly UaClientOptions _options;
         private readonly ILogger _logger;
         private volatile string? _endpointUrl;
-        private readonly object _lifecycleLock = new();
         private int _disposed;
         private volatile KeepAliveManager? _keepAliveManager;
         private volatile ReconnectEngine? _reconnectEngine;
-        private volatile ClientState _state = ClientState.Disconnected;
-        private readonly List<Subscription> _activeSubscriptions = new();
-        private readonly object _subsLock = new();
-
-        private readonly Dictionary<double, TaskCompletionSource<Subscription>> _pendingSubscriptionCreates = new();
 
         private TaskCompletionSource<bool>? _stopInProgress;
 
         /// <summary>Whether the client is currently connected and the underlying channel is alive.</summary>
-        public bool IsConnected => _state == ClientState.Connected && _client.IsAlive;
+        public bool IsConnected => _stateMachine.State == ClientState.Connected && _client.IsAlive;
 
         /// <summary>The session ID assigned by the server after a successful connection.</summary>
         public NodeId? SessionId => _client?.SessionId;
 
-        /// <summary>The configuration copy used at creation time (runtime changes have no effect).</summary>
+        /// <summary>
+        /// The private options snapshot taken at construction time. Mutations of the object passed
+        /// to the constructor have no effect on a running client.
+        /// </summary>
         public UaClientOptions Options => _options;
 
         /// <summary>The actual channel lifetime negotiated with the server (milliseconds).</summary>
         public uint RevisedChannelLifetime => _client?.RevisedChannelLifetime ?? 0;
 
         /// <summary>Current client connection state.</summary>
-        public ClientState State => _state;
+        public ClientState State => _stateMachine.State;
 
         private bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
@@ -121,14 +120,17 @@ namespace TinyUa.Client
         }
 
         /// <summary>Create a client with explicit options. URL must be set in the <c>ConnectTo(url)</c> step.</summary>
-        /// <param name="options">Client configuration. Must not be <c>null</c>.</param>
+        /// <param name="options">Client configuration. Must not be <c>null</c>. A deep copy is taken.</param>
         /// <param name="logger">Optional logger.</param>
         public UaClient(UaClientOptions options, ILogger? logger = null)
         {
-            _options = options ?? throw new ArgumentNullException(nameof(options));
+            if (options == null) throw new ArgumentNullException(nameof(options));
+            _options = options.Clone();
             _logger = logger ?? NullLogger.Instance;
-            _client = new UaConnection((int)options.Timeout, _logger);
-            _subscriptionRouter = new SubscriptionRouter(_client);
+            _client = new UaConnection((int)_options.Timeout, _logger);
+            _subscriptionRouter = new SubscriptionRouter(_client, _logger);
+            _orchestrator = new ConnectionOrchestrator(_client, _options, _logger);
+            _stateMachine.StateChanged += state => StateChanged?.Invoke(state);
         }
 
         /// <summary>Start connection without cancellation. Performs full handshake: Hello → OpenChannel → CreateSession → ActivateSession.</summary>
@@ -150,17 +152,17 @@ namespace TinyUa.Client
 
             ThrowIfDisposed();
 
-            lock (_lifecycleLock)
+            bool startConnecting = _stateMachine.Transition(state =>
             {
                 ThrowIfDisposed();
-                if (_state == ClientState.Connected || _state == ClientState.Connecting) return;
-                if (_state == ClientState.Disconnecting) return;
-                SetStateUnderLock(ClientState.Connecting);
-            }
-            StateChanged?.Invoke(ClientState.Connecting);
+                if (state == ClientState.Connected || state == ClientState.Connecting) return null;
+                if (state == ClientState.Disconnecting) return null;
+                return ClientState.Connecting;
+            });
+            if (!startConnecting) return;
 
             var retries = 0;
-            var delay = _options.ReconnectInitialDelayMs;
+            var backoff = new BackoffPolicy(_options.ReconnectInitialDelayMs, _options.ReconnectMaxDelayMs);
             var maxRetries = _options.ReconnectMaxRetries;
 
             while (maxRetries < 0 || retries <= maxRetries)
@@ -173,7 +175,7 @@ namespace TinyUa.Client
                 }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
-                    SetState(ClientState.Disconnected);
+                    _stateMachine.Set(ClientState.Disconnected);
                     try { await StopAsync().ConfigureAwait(false); } catch { }
 
                     retries++;
@@ -185,17 +187,17 @@ namespace TinyUa.Client
                         return;
                     }
 
-                    lock (_lifecycleLock)
+                    bool reentered = _stateMachine.Transition(state =>
                     {
-                        if (IsDisposed || _state == ClientState.Disconnecting) return;
-                        SetStateUnderLock(ClientState.Connecting);
-                    }
-                    StateChanged?.Invoke(ClientState.Connecting);
+                        if (IsDisposed || state == ClientState.Disconnecting) return null;
+                        return ClientState.Connecting;
+                    });
+                    if (!reentered) return;
 
+                    var delay = backoff.NextDelay();
                     _logger.LogWarning(ex, $"Connect attempt {retries} failed, retrying in {delay}ms");
                     try { await Task.Delay(delay, cancellationToken).ConfigureAwait(false); }
                     catch (OperationCanceledException) { return; }
-                    delay = Math.Min(delay * 2, _options.ReconnectMaxDelayMs);
                 }
             }
         }
@@ -204,136 +206,19 @@ namespace TinyUa.Client
         {
             _endpointUrl = endpointUrl;
 
-            var previousLogger = SecurityDebugLogger.Current;
-            SecurityDebugLogger.SetCurrentLogger(_logger);
-            try
-            {
-                await ConnectInternalCoreAsync(endpointUrl).ConfigureAwait(false);
-            }
-            finally
-            {
-                SecurityDebugLogger.SetCurrentLogger(previousLogger);
-            }
-        }
+            using var loggerScope = SecurityDebugLogger.BeginScope(_logger);
 
-        private async Task ConnectInternalCoreAsync(string endpointUrl)
-        {
-            var uri = new Uri(endpointUrl);
-            var host = uri.Host;
-            var port = uri.Port > 0 ? uri.Port : 4840;
-
-            var security = _options.Security;
-            var isSecure = SecurityPolicyFactory.IsSecurePolicy(security.Policy);
-
-            X509Certificate2? localCert = null;
-            if (isSecure)
-            {
-                localCert = LoadOrGenerateCertificate(security.Certificate);
-                _logger.LogDebug($"Client certificate: {(localCert?.Thumbprint ?? "null")}");
-            }
-
-            X509Certificate2? remoteCert = null;
-            var resolvedMode = security.Mode;
-            string? userTokenPolicyId = null;
-            EndpointDescription? selected = null;
-
-            if (isSecure && security.AutoDiscoverServerCertificate)
-            {
-                _logger.LogDebug("Discovering server endpoints via GetEndpoints (None policy)...");
-                var endpoints = await DiscoverEndpointsAsync(host, port, endpointUrl).ConfigureAwait(false);
-                SecurityDebugLogger.LogStage("Connect.GetEndpoints",
-                    ("endpointCount", endpoints?.Length ?? 0),
-                    ("requestedPolicy", security.Policy),
-                    ("requestedMode", security.Mode));
-                selected = SelectEndpoint(endpoints, security.Policy, security.Mode);
-                if (selected == null)
-                    throw new UaException(0x80000000,
-                        $"No server endpoint matches policy '{security.Policy}' with mode '{security.Mode}'.");
-
-                remoteCert = selected.ServerCertificateObject;
-                resolvedMode = selected.SecurityMode;
-                SecurityDebugLogger.LogStage("Connect.SelectEndpoint",
-                    ("endpointUrl", selected.EndpointUrl),
-                    ("securityMode", resolvedMode),
-                    ("securityPolicyUri", selected.SecurityPolicyUri),
-                    ("serverCertThumbprint", remoteCert?.Thumbprint),
-                    ("securityLevel", selected.SecurityLevel));
-
-                // Validate the discovered server certificate unless the caller opted into
-                // auto-trust. Without this, AutoAcceptServerCertificate=false had no effect.
-                if (!security.AutoAcceptServerCertificate)
-                {
-                    var validator = new CertificateValidator();
-                    try
-                    {
-                        validator.Validate(remoteCert, isServerCertificate: true);
-                    }
-                    catch (Exception ex)
-                    {
-                        throw new UaException(0x80120000,
-                            $"Server certificate validation failed: {ex.Message}");
-                    }
-                }
-
-                // Resolve the server's PolicyId for the configured user token type (UserName or
-                // Certificate). Anonymous needs no policy id. Matching by TokenType ensures a
-                // Certificate identity gets the certificate policy id, not the username one.
-                if (security.UserIdentity.Type != UserTokenType.Anonymous && selected.UserIdentityTokens != null)
-                {
-                    var tokenPolicy = selected.UserIdentityTokens
-                        .FirstOrDefault(t => t.TokenType == security.UserIdentity.Type);
-                    userTokenPolicyId = tokenPolicy?.PolicyId;
-                }
-            }
-
-            var policy = SecurityPolicyFactory.Create(security.Policy, localCert, remoteCert, resolvedMode);
-            _client.SetSecurityPolicy(policy);
-
-            // Use discovered endpoint URL if available, otherwise user-provided
-            var effectiveUrl = selected?.EndpointUrl ?? endpointUrl;
-
-            await _client.ConnectAsync(host, port).ConfigureAwait(false);
-            await _client.SendHelloAsync(effectiveUrl, _options.MaxMessageSize).ConfigureAwait(false);
-
-            var clientNonce = new byte[policy.NonceLength];
-            if (clientNonce.Length > 0)
-                RandomNumberGenerator.Fill(clientNonce);
-
-            await _client.OpenSecureChannelAsync(new OpenSecureChannelParameters
-            {
-                RequestType = SecurityTokenRequestType.Issue,
-                SecurityMode = resolvedMode,
-                ClientNonce = clientNonce.Length > 0 ? clientNonce : null,
-                RequestedLifetime = _options.ChannelLifetime
-            }).ConfigureAwait(false);
-
-            var createResponse = await _client.CreateSessionAsync(effectiveUrl, _options.ApplicationName,
-                _options.ApplicationUri, _options.ProductUri, (uint)_options.SessionTimeout).ConfigureAwait(false);
-
-            SecurityDebugLogger.LogStage("Connect.CreateSession",
-                ("sessionId", createResponse.SessionId),
-                ("serverNonceLen", createResponse.ServerNonce?.Length ?? -1),
-                ("serverCertLen", createResponse.ServerCertificate?.Length ?? -1),
-                ("serverSignatureAlg", createResponse.ServerSignature?.Algorithm),
-                ("endpointsCount", createResponse.ServerEndpoints?.Length ?? 0));
-
-            var identity = BuildUserIdentity(security.UserIdentity, createResponse, policy, userTokenPolicyId);
-            await _client.ActivateSessionAsync(identity).ConfigureAwait(false);
+            await _orchestrator.ConnectAsync(endpointUrl).ConfigureAwait(false);
 
             _client.ConnectionLost += OnSocketConnectionLost;
 
-            bool connectCompleted = false;
-            lock (_lifecycleLock)
+            bool connectCompleted = _stateMachine.Transition(state =>
             {
-                if (!IsDisposed && _state == ClientState.Connecting)
-                {
-                    SetStateUnderLock(ClientState.Connected);
-                    connectCompleted = true;
-                }
-            }
-            if (connectCompleted)
-                StateChanged?.Invoke(ClientState.Connected);
-            else
+                if (!IsDisposed && state == ClientState.Connecting)
+                    return ClientState.Connected;
+                return null;
+            });
+            if (!connectCompleted)
                 return;
 
             StartKeepAlive();
@@ -341,175 +226,28 @@ namespace TinyUa.Client
             var sessionId = _client.SessionId;
             var authToken = new NodeId();
             _reconnectEngine = new ReconnectEngine(_client, _options, _logger);
-            _reconnectEngine.ReconnectStarted += () => SetState(ClientState.Reconnecting);
+            _reconnectEngine.ReconnectStarted += () => _stateMachine.Set(ClientState.Reconnecting);
             _reconnectEngine.ReconnectCompleted += (lossless) =>
             {
-                SetState(ClientState.Connected);
+                _stateMachine.Set(ClientState.Connected);
 
                 StartKeepAlive();
+
+                // Publishing was stopped when the connection dropped; the session-level publish
+                // engine must be re-attached or a losslessly recovered session would receive
+                // republished history but no further live notifications.
+                foreach (var sub in _subscriptions.Snapshot())
+                {
+                    try { sub.StartPublishing(); } catch { }
+                }
+
                 SubscriptionsRecovered?.Invoke(lossless);
             };
-            _reconnectEngine.ReconnectFailed += () => SetState(ClientState.Disconnected);
+            _reconnectEngine.ReconnectFailed += () => _stateMachine.Set(ClientState.Disconnected);
             _reconnectEngine.ReconnectBackoff += (retry, delay) => ReconnectBackoff?.Invoke(retry, delay);
 
             if (sessionId != null)
                 _reconnectEngine.OnSessionEstablished(sessionId, authToken);
-
-            await Task.CompletedTask;
-        }
-
-        private static string? GetUriFromCertificate(X509Certificate2 cert)
-        {
-            try
-            {
-                // SAN OID = 2.5.29.17
-                var sanExt = cert.Extensions["2.5.29.17"];
-                if (sanExt == null) return null;
-                var s = sanExt.Format(false);
-                // Format is "URL=uri, DNS Name=host"
-                foreach (var part in s.Split(','))
-                {
-                    var trimmed = part.Trim();
-                    if (trimmed.StartsWith("URL=", StringComparison.OrdinalIgnoreCase))
-                        return trimmed.Substring(4);
-                }
-            }
-            catch { }
-            return null;
-        }
-
-        private X509Certificate2? LoadOrGenerateCertificate(CertificateOptions certOptions)
-        {
-            // Try loading from file first
-            if (!string.IsNullOrEmpty(certOptions.CertificatePath) && File.Exists(certOptions.CertificatePath))
-            {
-                X509Certificate2 cert;
-                if (!string.IsNullOrEmpty(certOptions.PrivateKeyPath))
-                {
-                    (cert, _) = CertificateLoader.LoadCertificateWithKey(
-                        certOptions.CertificatePath!, certOptions.PrivateKeyPath!);
-                }
-                else
-                {
-                    cert = CertificateLoader.LoadCertificate(certOptions.CertificatePath!, certOptions.PrivateKeyPassword);
-                }
-
-                // Sync ApplicationUri to match the loaded certificate's URI SAN
-                var certUri = GetUriFromCertificate(cert);
-                if (certUri != null && _options.ApplicationUri != certUri)
-                {
-                    _logger.LogDebug($"Syncing ApplicationUri to cert URI: {certUri}");
-                    _options.ApplicationUri = certUri;
-                }
-
-                return cert;
-            }
-
-            if (certOptions.AutoGenerate)
-            {
-                _logger.LogDebug($"Auto-generating self-signed certificate " +
-                    $"(CN={_options.ApplicationName}, URI={_options.ApplicationUri})...");
-                var (cert, _) = CertificateGenerator.CreateSelfSigned(
-                    _options.ApplicationName,
-                    _options.ApplicationUri,
-                    certOptions.KeySize,
-                    certOptions.ValidityYears);
-
-                // Save to file if path is specified
-                if (!string.IsNullOrEmpty(certOptions.CertificatePath))
-                {
-                    var pfxPassword = certOptions.PrivateKeyPassword ?? "";
-                    var pfxBytes = string.IsNullOrEmpty(pfxPassword)
-                        ? cert.Export(X509ContentType.Pfx)
-                        : cert.Export(X509ContentType.Pfx, pfxPassword);
-                    File.WriteAllBytes(certOptions.CertificatePath, pfxBytes);
-
-                    // Also save DER format for servers that don't accept PFX
-                    var derPath = Path.ChangeExtension(certOptions.CertificatePath, ".der");
-                    File.WriteAllBytes(derPath, cert.RawData);
-                }
-
-                return cert;
-            }
-
-            return null;
-        }
-
-        private async Task<EndpointDescription[]?> DiscoverEndpointsAsync(string host, int port, string endpointUrl)
-        {
-            await _client.ConnectAsync(host, port).ConfigureAwait(false);
-            try
-            {
-                await _client.SendHelloAsync(endpointUrl, _options.MaxMessageSize).ConfigureAwait(false);
-                await _client.OpenSecureChannelAsync(new OpenSecureChannelParameters
-                {
-                    RequestType = SecurityTokenRequestType.Issue,
-                    SecurityMode = MessageSecurityMode.None,
-                    ClientNonce = null,
-                    RequestedLifetime = 60000
-                }).ConfigureAwait(false);
-
-                return await _client.GetEndpointsAsync(endpointUrl).ConfigureAwait(false);
-            }
-            finally
-            {
-                await _client.DisconnectAsync().ConfigureAwait(false);
-            }
-        }
-
-        private static EndpointDescription? SelectEndpoint(
-            EndpointDescription[]? endpoints, string policyName, MessageSecurityMode mode)
-        {
-            if (endpoints == null || endpoints.Length == 0)
-                return null;
-
-            var policyUri = SecurityPolicyFactory.NormalizePolicyUri(policyName);
-            var suffix = policyUri.Substring(policyUri.LastIndexOf('#'));
-
-            var candidates = endpoints.Where(ep =>
-                ep.SecurityPolicyUri != null
-                && ep.SecurityPolicyUri.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
-                && ep.SecurityMode == mode);
-
-            if (!candidates.Any())
-            {
-                candidates = endpoints.Where(ep =>
-                    ep.SecurityPolicyUri != null
-                    && ep.SecurityPolicyUri.EndsWith(suffix, StringComparison.OrdinalIgnoreCase));
-            }
-
-            return candidates.OrderByDescending(ep => ep.SecurityLevel).FirstOrDefault();
-        }
-
-        private static UserIdentityToken BuildUserIdentity(
-            UserIdentityOptions identityOptions,
-            CreateSessionResponse createResponse,
-            SecurityPolicy policy,
-            string? userTokenPolicyId)
-        {
-            if (identityOptions.Type == UserTokenType.UserName)
-            {
-                return UserIdentityToken.CreateUserName(
-                    identityOptions.Username ?? "",
-                    identityOptions.Password ?? "",
-                    userTokenPolicyId,
-                    createResponse.ServerNonce,
-                    createResponse.ServerCertificate,
-                    policy.Uri);
-            }
-
-            if (identityOptions.Type == UserTokenType.Certificate)
-            {
-                return new UserIdentityToken
-                {
-                    TokenType = UserTokenType.Certificate,
-                    PolicyId = userTokenPolicyId,
-                    IssuedId = policy.SenderCertificate,
-                    SecurityPolicyUri = policy.Uri
-                };
-            }
-
-            return UserIdentityToken.Anonymous();
         }
 
         /// <summary>Stop the connection and release the session. Returns immediately if already disconnected.</summary>
@@ -523,34 +261,30 @@ namespace TinyUa.Client
         private async Task StopAsyncCore()
         {
             TaskCompletionSource<bool>? waiter = null;
-            bool iAmStopper;
+            bool iAmStopper = false;
             bool alreadyDisconnected = false;
-            lock (_lifecycleLock)
+
+            _stateMachine.Transition(state =>
             {
-                if (_state == ClientState.Disconnected)
+                if (state == ClientState.Disconnected)
                 {
-
                     alreadyDisconnected = true;
-                    iAmStopper = false;
+                    return null;
                 }
-                else if (_state == ClientState.Disconnecting)
+                if (state == ClientState.Disconnecting)
                 {
-
                     waiter = _stopInProgress;
-                    iAmStopper = false;
+                    return null;
                 }
-                else
-                {
-                    iAmStopper = true;
-                    _stopInProgress = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-                    SetStateUnderLock(ClientState.Disconnecting);
-                }
-            }
+                iAmStopper = true;
+                _stopInProgress = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                return ClientState.Disconnecting;
+            });
 
             if (alreadyDisconnected)
             {
-                StateChanged?.Invoke(ClientState.Disconnecting);
-                StateChanged?.Invoke(ClientState.Disconnected);
+                _stateMachine.Replay(ClientState.Disconnecting);
+                _stateMachine.Replay(ClientState.Disconnected);
                 return;
             }
 
@@ -563,23 +297,13 @@ namespace TinyUa.Client
                 return;
             }
 
-            StateChanged?.Invoke(ClientState.Disconnecting);
-
+            // The transition above already raised StateChanged(Disconnecting).
             try
             {
                 _reconnectEngine?.CancelReconnect();
                 StopAndDisposeKeepAlive();
 
-                Subscription[] subsToDispose;
-                lock (_subsLock)
-                {
-                    subsToDispose = _activeSubscriptions.ToArray();
-                    _activeSubscriptions.Clear();
-
-                    foreach (var kvp in _pendingSubscriptionCreates)
-                        kvp.Value.TrySetException(new ObjectDisposedException(nameof(UaClient)));
-                    _pendingSubscriptionCreates.Clear();
-                }
+                var subsToDispose = _subscriptions.DrainForShutdown(new ObjectDisposedException(nameof(UaClient)));
                 foreach (var sub in subsToDispose)
                 {
                     try { sub.Dispose(); } catch { }
@@ -591,9 +315,7 @@ namespace TinyUa.Client
             }
             finally
             {
-                lock (_lifecycleLock)
-                    SetStateUnderLock(ClientState.Disconnected);
-                StateChanged?.Invoke(ClientState.Disconnected);
+                _stateMachine.Set(ClientState.Disconnected);
 
                 var tcs = _stopInProgress;
                 _stopInProgress = null;
@@ -627,29 +349,26 @@ namespace TinyUa.Client
         {
             _logger.LogWarning(ex, "Connection lost — triggering reconnect");
 
-            ReconnectEngine? engine;
-            string? endpointUrl;
-            Subscription[] activeSubs;
+            ReconnectEngine? engine = null;
+            string? endpointUrl = null;
 
-            lock (_lifecycleLock)
+            bool transitioned = _stateMachine.Transition(state =>
             {
-
                 if (IsDisposed
-                    || _state == ClientState.Disconnecting
-                    || _state == ClientState.Disconnected)
-                    return;
+                    || state == ClientState.Disconnecting
+                    || state == ClientState.Disconnected)
+                    return null;
 
-                SetStateUnderLock(ClientState.Reconnecting);
                 engine = _reconnectEngine;
                 endpointUrl = _endpointUrl;
-            }
-            StateChanged?.Invoke(ClientState.Reconnecting);
+                return ClientState.Reconnecting;
+            });
+            if (!transitioned)
+                return;
 
             StopAndDisposeKeepAlive();
 
-            lock (_subsLock)
-                activeSubs = _activeSubscriptions.ToArray();
-            foreach (var sub in activeSubs)
+            foreach (var sub in _subscriptions.Snapshot())
             {
                 try { sub.StopPublishing(); } catch { }
             }
@@ -668,8 +387,7 @@ namespace TinyUa.Client
             {
                 oldSub.StopPublishing();
                 try { oldSub.Dispose(); } catch { }
-                lock (_subsLock)
-                    _activeSubscriptions.Remove(oldSub);
+                _subscriptions.Remove(oldSub);
             }
 
             var sub = await SubscriptionManager.CreateSubscriptionAsync(
@@ -682,8 +400,7 @@ namespace TinyUa.Client
             template.SubscriptionId = sub.SubscriptionId;
             template.ActiveSubscription = sub;
 
-            lock (_subsLock)
-                _activeSubscriptions.Add(sub);
+            _subscriptions.Add(sub);
 
             foreach (var item in template.Items)
             {
@@ -693,48 +410,31 @@ namespace TinyUa.Client
             return sub;
         }
 
-        private ClientState SetStateUnderLock(ClientState state)
-        {
-            _state = state;
-            return state;
-        }
-
-        private void SetState(ClientState state)
-        {
-            ClientState captured;
-            lock (_lifecycleLock)
-                captured = SetStateUnderLock(state);
-            StateChanged?.Invoke(captured);
-        }
-
         private async Task EnsureConnectedAsync(CancellationToken cancellationToken = default)
         {
             ThrowIfDisposed();
 
-            if (_state == ClientState.Connected && _client.IsAlive)
+            if (_stateMachine.State == ClientState.Connected && _client.IsAlive)
                 return;
 
-            ReconnectEngine? engine;
-            string? endpointUrl;
-            bool iTriggeredReconnect = false;
+            ReconnectEngine? engine = null;
+            string? endpointUrl = null;
 
-            lock (_lifecycleLock)
+            _stateMachine.Transition(state =>
             {
                 ThrowIfDisposed();
-                if (_state != ClientState.Reconnecting
-                    && _state != ClientState.Connecting
-                    && _state != ClientState.Disconnecting
-                    && _state != ClientState.Disconnected)
-                {
-                    _logger.LogWarning($"EnsureConnectedAsync: connection dead (state={_state}, alive={_client.IsAlive}) — triggering reconnect");
-                    SetStateUnderLock(ClientState.Reconnecting);
-                    iTriggeredReconnect = true;
-                }
                 engine = _reconnectEngine;
                 endpointUrl = _endpointUrl;
-            }
-            if (iTriggeredReconnect)
-                StateChanged?.Invoke(ClientState.Reconnecting);
+                if (state != ClientState.Reconnecting
+                    && state != ClientState.Connecting
+                    && state != ClientState.Disconnecting
+                    && state != ClientState.Disconnected)
+                {
+                    _logger.LogWarning($"EnsureConnectedAsync: connection dead (state={state}, alive={_client.IsAlive}) — triggering reconnect");
+                    return ClientState.Reconnecting;
+                }
+                return null;
+            });
 
             if (engine == null || string.IsNullOrEmpty(endpointUrl))
                 throw new UaConnectionException("Client is not connected. Call RunAsync() first.");
@@ -779,7 +479,7 @@ namespace TinyUa.Client
                 {
 
                     _logger.LogWarning(ex, $"{operationName} timed out waiting for reconnection");
-                    SetState(ClientState.Reconnecting);
+                    _stateMachine.Set(ClientState.Reconnecting);
                     if (_options.ErrorMode == ErrorMode.Throw)
                         throw new UaConnectionException($"{operationName} timed out waiting for reconnection");
                     return null;
@@ -787,7 +487,7 @@ namespace TinyUa.Client
                 catch (Exception ex) when (attempt == 0 && IsConnectionError(ex))
                 {
                     _logger.LogWarning(ex, $"{operationName} failed with connection error — reconnecting and retrying");
-                    SetState(ClientState.Reconnecting);
+                    _stateMachine.Set(ClientState.Reconnecting);
                     continue;
                 }
                 catch (Exception ex)
@@ -991,59 +691,8 @@ namespace TinyUa.Client
             return await ExecuteWithRetryAsync("BrowseNext", () => _client!.BrowseNextAsync(continuationPoint), cancellationToken).ConfigureAwait(false);
         }
 
-        private async Task<Subscription> GetOrCreateDefaultSubscriptionAsync(double interval, CancellationToken cancellationToken = default)
-        {
-            TaskCompletionSource<Subscription>? pending;
-            bool iAmCreator;
-
-            // Dedup and pending-create tracking must use the same resolution, otherwise two
-            // near-equal intervals (e.g. 500.0 vs 500.0004) pass the reuse scan yet get distinct
-            // raw-double dictionary keys and create duplicate subscriptions. Quantize the key to
-            // the same 0.001 ms granularity used by the reuse comparison below.
-            double intervalKey = Math.Round(interval, 3);
-
-            lock (_subsLock)
-            {
-
-                foreach (var sub in _activeSubscriptions)
-                {
-                    if (Math.Abs(sub.PublishingInterval - interval) < 0.001)
-                        return sub;
-                }
-
-                if (_pendingSubscriptionCreates.TryGetValue(intervalKey, out pending))
-                {
-                    iAmCreator = false;
-                }
-                else
-                {
-                    iAmCreator = true;
-                    pending = new TaskCompletionSource<Subscription>(
-                        TaskCreationOptions.RunContinuationsAsynchronously);
-                    _pendingSubscriptionCreates[intervalKey] = pending;
-                }
-            }
-
-            if (!iAmCreator)
-                return await pending!.Task.ConfigureAwait(false);
-
-            try
-            {
-                var sub = await CreateSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
-                pending!.SetResult(sub);
-                return sub;
-            }
-            catch (Exception ex)
-            {
-                pending!.SetException(ex);
-                throw;
-            }
-            finally
-            {
-                lock (_subsLock)
-                    _pendingSubscriptionCreates.Remove(intervalKey);
-            }
-        }
+        private Task<Subscription> GetOrCreateDefaultSubscriptionAsync(double interval, CancellationToken cancellationToken = default)
+            => _subscriptions.GetOrCreateAsync(interval, () => CreateSubscriptionAsync(interval, cancellationToken));
 
         /// <summary>
         /// Create a subscription. Multiple calls with the same <paramref name="publishingInterval"/>
@@ -1056,28 +705,24 @@ namespace TinyUa.Client
         {
             await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
 
-            var result = await _subscriptionRouter.CreateSubscriptionAsync(publishingInterval).ConfigureAwait(false);
-            var sub = new Subscription(
+            var sub = await SubscriptionManager.CreateSubscriptionAsync(
                 _subscriptionRouter,
-                result.SubscriptionId,
-                result.RevisedPublishingInterval,
-                result.RevisedLifetimeCount,
-                result.RevisedMaxKeepAliveCount,
-                maxPublishRequests: 2,
-                _logger);
-            sub.StartPublishing();
+                publishingInterval,
+                autoStart: true,
+                _options.MaxPublishRequests,
+                _logger).ConfigureAwait(false);
 
             var template = new SubscriptionTemplate
             {
                 SubscriptionId = sub.SubscriptionId,
                 PublishingInterval = publishingInterval,
                 LifetimeCount = sub.LifetimeCount,
-                MaxKeepAliveCount = sub.MaxKeepAliveCount
+                MaxKeepAliveCount = sub.MaxKeepAliveCount,
+                MaxPublishRequests = _options.MaxPublishRequests
             };
             _reconnectEngine?.RegisterSubscription(template, sub);
 
-            lock (_subsLock)
-                _activeSubscriptions.Add(sub);
+            _subscriptions.Add(sub);
 
             return sub;
         }
@@ -1089,8 +734,7 @@ namespace TinyUa.Client
         {
             if (subscription == null) throw new ArgumentNullException(nameof(subscription));
             _reconnectEngine?.UnregisterSubscription(subscription.SubscriptionId);
-            lock (_subsLock)
-                _activeSubscriptions.Remove(subscription);
+            _subscriptions.Remove(subscription);
             await subscription.DeleteAsync().ConfigureAwait(false);
         }
 
@@ -1125,7 +769,7 @@ namespace TinyUa.Client
             await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
             var sub = await GetOrCreateDefaultSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
             var item = await sub.AddMonitoredItemAsync(nodeId, handler, queueSize).ConfigureAwait(false);
-            UpdateTemplate(sub, nodeId, interval, queueSize, handler);
+            UpdateTemplate(sub, nodeId, interval, queueSize, handler, clientHandle: item.ClientHandle);
             return (sub, item.MonitoredItemId);
         }
 
@@ -1148,8 +792,8 @@ namespace TinyUa.Client
             var sub = await GetOrCreateDefaultSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
             for (int i = 0; i < nodeIds.Length; i++)
             {
-                await sub.AddMonitoredItemAsync(nodeIds[i], handler, queueSize).ConfigureAwait(false);
-                UpdateTemplate(sub, nodeIds[i], interval, queueSize, handler);
+                var item = await sub.AddMonitoredItemAsync(nodeIds[i], handler, queueSize).ConfigureAwait(false);
+                UpdateTemplate(sub, nodeIds[i], interval, queueSize, handler, clientHandle: item.ClientHandle);
             }
             return sub;
         }
@@ -1175,7 +819,7 @@ namespace TinyUa.Client
             await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
             var sub = await GetOrCreateDefaultSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
             var item = await sub.AddMonitoredItemAsync(nodeId, interval, handler: null, queueSize, handlerEx: handler).ConfigureAwait(false);
-            UpdateTemplate(sub, nodeId, interval, queueSize, handler: null, handlerEx: handler);
+            UpdateTemplate(sub, nodeId, interval, queueSize, handler: null, handlerEx: handler, clientHandle: item.ClientHandle);
             return (sub, item.MonitoredItemId);
         }
 
@@ -1199,13 +843,13 @@ namespace TinyUa.Client
             var sub = await GetOrCreateDefaultSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
             for (int i = 0; i < nodeIds.Length; i++)
             {
-                await sub.AddMonitoredItemAsync(nodeIds[i], interval, handler: null, queueSize, handlerEx: handler).ConfigureAwait(false);
-                UpdateTemplate(sub, nodeIds[i], interval, queueSize, handler: null, handlerEx: handler);
+                var item = await sub.AddMonitoredItemAsync(nodeIds[i], interval, handler: null, queueSize, handlerEx: handler).ConfigureAwait(false);
+                UpdateTemplate(sub, nodeIds[i], interval, queueSize, handler: null, handlerEx: handler, clientHandle: item.ClientHandle);
             }
             return sub;
         }
 
-        private void UpdateTemplate(Subscription sub, NodeId nodeId, double samplingInterval, uint queueSize, DataChangeHandler? handler, DataChangeHandlerEx? handlerEx = null)
+        private void UpdateTemplate(Subscription sub, NodeId nodeId, double samplingInterval, uint queueSize, DataChangeHandler? handler, DataChangeHandlerEx? handlerEx = null, uint clientHandle = 0)
         {
 
             _reconnectEngine?.RegisterSubscription(new SubscriptionTemplate
@@ -1221,6 +865,7 @@ namespace TinyUa.Client
                         NodeId = nodeId,
                         SamplingInterval = samplingInterval,
                         QueueSize = queueSize,
+                        ClientHandle = clientHandle,
                         Handler = handler,
                         HandlerEx = handlerEx
                     }
@@ -1306,7 +951,7 @@ namespace TinyUa.Client
             double interval = 1000.0,
             CancellationToken cancellationToken = default)
         {
-            var nodeId = NodeId.Parse(nodeIdString);
+            var nodeId = ParseNodeId(nodeIdString);
             await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
             var sub = await GetOrCreateDefaultSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
             DataChangeHandler handler = (_, value, status) =>
@@ -1316,8 +961,8 @@ namespace TinyUa.Client
                 else
                     onDataChanged(default);
             };
-            await sub.AddMonitoredItemAsync(nodeId, handler).ConfigureAwait(false);
-            UpdateTemplate(sub, nodeId, interval, 0, handler);
+            var item = await sub.AddMonitoredItemAsync(nodeId, handler).ConfigureAwait(false);
+            UpdateTemplate(sub, nodeId, interval, 0, handler, clientHandle: item.ClientHandle);
             return sub;
         }
 
@@ -1337,7 +982,7 @@ namespace TinyUa.Client
             double interval = 1000.0,
             CancellationToken cancellationToken = default)
         {
-            var nodeId = NodeId.Parse(nodeIdString);
+            var nodeId = ParseNodeId(nodeIdString);
             await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
             var sub = await GetOrCreateDefaultSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
             DataChangeHandler handler = (_, value, status) =>
@@ -1347,131 +992,9 @@ namespace TinyUa.Client
                 else
                     onDataChanged(default, status);
             };
-            await sub.AddMonitoredItemAsync(nodeId, handler).ConfigureAwait(false);
-            UpdateTemplate(sub, nodeId, interval, 0, handler);
+            var item = await sub.AddMonitoredItemAsync(nodeId, handler).ConfigureAwait(false);
+            UpdateTemplate(sub, nodeId, interval, 0, handler, clientHandle: item.ClientHandle);
             return sub;
-        }
-
-        /// <summary>
-        /// Start the fluent configuration chain. Use <c>.WithSecurity(...)</c>, <c>.WithUserName(...)</c>,
-        /// <c>.WithAppName(...)</c>, etc., then call <c>.BuildAndRunAsync()</c> to connect.
-        /// </summary>
-        /// <param name="endpointUrl">OPC UA server URL, e.g. <c>opc.tcp://localhost:4840</c>.</param>
-        /// <returns>A <see cref="ClientBuilder"/> for fluent configuration.</returns>
-        public static ClientBuilder ConnectTo(string endpointUrl)
-            => new ClientBuilder(endpointUrl);
-
-        /// <summary>
-        /// Start the fluent configuration chain from a <see cref="Uri"/>.
-        /// </summary>
-        public static ClientBuilder ConnectTo(Uri endpointUri)
-            => new ClientBuilder(endpointUri.ToString());
-
-        /// <summary>
-        /// Fluent builder for configuring and connecting a <see cref="UaClient"/>.
-        /// All <c>With*</c> methods return the builder for chaining.
-        /// Call <see cref="Build"/> to create the client without connecting,
-        /// or <see cref="BuildAndRunAsync"/> to create and connect immediately.
-        /// </summary>
-        public class ClientBuilder
-        {
-            private readonly string _endpointUrl;
-
-            private readonly UaClientOptions _options = UaClientOptions.Default;
-            private bool _reconnect = true;
-            private ILogger? _logger;
-
-            internal ClientBuilder(string endpointUrl) { _endpointUrl = endpointUrl; }
-
-            /// <summary>Set per-step network timeout (socket I/O and reconnect attempts). Default 30000ms.</summary>
-            /// <param name="milliseconds">Timeout in milliseconds.</param>
-            public ClientBuilder WithRequestTimeout(int milliseconds) { _options.Timeout = (uint)milliseconds; return this; }
-
-            /// <summary>Set the application name displayed in server session diagnostics. Also updates the ApplicationUri.</summary>
-            public ClientBuilder WithAppName(string name) { _options.ApplicationName = name; _options.ApplicationUri = $"urn:{name}:{Guid.NewGuid()}"; return this; }
-
-            /// <summary>Disable automatic reconnect. Equivalent to <c>WithReconnectRetries(0)</c>.</summary>
-            public ClientBuilder WithoutReconnect() { _reconnect = false; return this; }
-
-            /// <summary>Set maximum reconnect attempts. Default -1 (infinite). Set to 0 to disable.</summary>
-            public ClientBuilder WithReconnectRetries(int maxRetries) { _options.ReconnectMaxRetries = maxRetries; return this; }
-
-            /// <summary>Set the session timeout in milliseconds. Default 3600000 (1 hour).</summary>
-            public ClientBuilder WithSessionTimeout(int ms) { _options.SessionTimeout = ms; return this; }
-
-            /// <summary>Set the error handling strategy. Default <see cref="ErrorMode.Throw"/>.</summary>
-            public ClientBuilder WithErrorMode(ErrorMode mode) { _options.ErrorMode = mode; return this; }
-
-            /// <summary>
-            /// Set the security policy by short name (e.g. <c>"Basic256Sha256"</c>, <c>"Aes128_Sha256_RsaOaep"</c>,
-            /// <c>"Aes256_Sha256_RsaPss"</c>, <c>"None"</c>). Non-None policies auto-enable SignAndEncrypt mode.
-            /// </summary>
-            public ClientBuilder WithSecurity(string policy)
-            {
-                _options.Security.Policy = policy;
-                if (policy != "None")
-                    _options.Security.Mode = TinyUa.Core.Security.MessageSecurityMode.SignAndEncrypt;
-                return this;
-            }
-
-            /// <summary>Configure security with a callback for full control over <see cref="SecurityOptions"/>.</summary>
-            /// <param name="configure">Action that receives the <see cref="SecurityOptions"/> to modify.</param>
-            public ClientBuilder WithSecurity(Action<SecurityOptions> configure)
-            {
-                configure(_options.Security);
-                return this;
-            }
-
-            /// <summary>Set username/password authentication. The password is RSA-OAEP encrypted before transmission.</summary>
-            /// <param name="username">The username.</param>
-            /// <param name="password">The password (plaintext, will be encrypted for transmission).</param>
-            public ClientBuilder WithUserName(string username, string password)
-            {
-                _options.Security.UserIdentity.Type = TinyUa.Core.Security.UserTokenType.UserName;
-                _options.Security.UserIdentity.Username = username;
-                _options.Security.UserIdentity.Password = password;
-                return this;
-            }
-
-            /// <summary>Attach a custom <see cref="ILogger"/> implementation.</summary>
-            public ClientBuilder WithLogger(ILogger logger) { _logger = logger; return this; }
-
-            /// <summary>Enable console logging via a simple callback. For custom loggers, use <see cref="WithLogger"/> instead.</summary>
-            /// <param name="sink">Callback receiving (LogLevel, Exception?, message).</param>
-            /// <param name="minLevel">Minimum log level to record. Default <see cref="LogLevel.Debug"/>.</param>
-            public ClientBuilder EnableLog(Action<LogLevel, Exception?, string> sink, LogLevel minLevel = LogLevel.Debug)
-            {
-                _logger = new DelegateLogger(sink, minLevel);
-                return this;
-            }
-
-            /// <summary>Enable logging to a directory. Log files are auto-created and auto-rotated.</summary>
-            /// <param name="directory">Directory path for log files (created if needed).</param>
-            /// <param name="minLevel">Minimum log level. Default <see cref="LogLevel.Debug"/>.</param>
-            /// <param name="async">Use asynchronous file writes. Default false.</param>
-            public ClientBuilder EnableLogFile(string directory, LogLevel minLevel = LogLevel.Debug, bool async = false)
-            {
-                _logger = new FileLogger(directory, minLevel, async);
-                return this;
-            }
-
-            /// <summary>Build the <see cref="UaClient"/> without connecting. Call <see cref="UaClient.RunAsync()"/> to connect later.</summary>
-            public UaClient Build()
-            {
-                _options.ReconnectMaxRetries = _reconnect ? _options.ReconnectMaxRetries : 0;
-                var client = new UaClient(_options, _logger);
-                client._endpointUrl = _endpointUrl;
-                return client;
-            }
-
-            /// <summary>Build the client and connect immediately. Equivalent to <c>Build()</c> followed by <c>RunAsync()</c>.</summary>
-            /// <returns>A connected <see cref="UaClient"/> ready for operations.</returns>
-            public async Task<UaClient> BuildAndRunAsync()
-            {
-                var client = Build();
-                await client.RunAsync().ConfigureAwait(false);
-                return client;
-            }
         }
     }
 }
