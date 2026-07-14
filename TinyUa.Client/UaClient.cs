@@ -223,8 +223,42 @@ namespace TinyUa.Client
 
             StartKeepAlive();
 
+            // Warmup read: Server.ServerStatus.State (i=2259) — the same node KeepAliveManager
+            // polls later. Reading it once here pre-compiles (JIT) the entire Read call stack
+            // (ExecuteWithRetryAsync<ReadResult[]> → UaConnection.ReadAsync(NodeId[]) →
+            // ReadRequest.Encode / ReadResponse.Decode / DataValue / Variant decoding) so the
+            // caller's first business Read doesn't pay the one-time ~4ms JIT cost. A failure here
+            // only logs a warning: the connection itself has already succeeded.
+            if (_options.WarmupOnConnect)
+            {
+                try
+                {
+                    // Read both a scalar (ServerStatus.State, i=2259 — UInt32) and an array
+                    // (ServerArray, i=2254 — String[]) so that VariantCodec.DecodeScalarValue AND
+                    // VariantCodec.DecodeArrayValue are JIT-compiled before the caller's first
+                    // business Read. Without the array node, the first Read returning an array
+                    // (e.g. ServerArray, NodeIds[]) pays a one-time ~0.3ms JIT cost for
+                    // DecodeArrayValue — the last remaining gap vs. the OPCF SDK's first-read
+                    // latency.
+                    var warmupResults = await ReadAsync(
+                        new[] { new NodeId(2259u), new NodeId(2254u) }, AttributeId.Value).ConfigureAwait(false);
+                    if (warmupResults is { Length: > 0 } && warmupResults[0].StatusCode.IsGood)
+                    {
+                        _logger.LogDebug($"Warmup read OK: ServerStatus.State={warmupResults[0].DataValue?.Value?.Value}, ServerArray=[{warmupResults.Length}] nodes");
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Warmup read returned a bad or empty result (ignored)");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Warmup read of Server.ServerStatus failed (ignored)");
+                }
+            }
+
             var sessionId = _client.SessionId;
-            var authToken = new NodeId();
+            var authToken = _client.AuthenticationToken ?? new NodeId();
             _reconnectEngine = new ReconnectEngine(_client, _options, _logger);
             _reconnectEngine.ReconnectStarted += () => _stateMachine.Set(ClientState.Reconnecting);
             _reconnectEngine.ReconnectCompleted += (lossless) =>

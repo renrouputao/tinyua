@@ -55,6 +55,16 @@ namespace TinyUa.Client
         /// <summary>Secure channel lifetime in milliseconds. The channel is automatically renewed before expiry. Default 3600000 (1 hour).</summary>
         public uint ChannelLifetime { get; set; } = 3600000;
 
+        /// <summary>
+        /// Perform a warmup read of <c>Server.ServerStatus.State</c> (i=2259) immediately after the
+        /// session is activated. This serves two purposes: (1) it confirms the server is responsive
+        /// before the first application request, and (2) it pre-compiles (JIT) the Read codec path —
+        /// <c>ReadRequest.Encode</c>, <c>ReadResponse.Decode</c>, <c>DataValue</c>/<c>Variant</c>
+        /// decoding — so the caller's first business Read doesn't pay the one-time ~4ms JIT cost.
+        /// Default <c>true</c>. Set to <c>false</c> to skip (e.g. when connecting to a known-slow server).
+        /// </summary>
+        public bool WarmupOnConnect { get; set; } = true;
+
         /// <summary>Maximum message size in bytes. 0 means unlimited (use server default).</summary>
         public uint MaxMessageSize { get; set; } = 0;
 
@@ -96,6 +106,7 @@ namespace TinyUa.Client
             SessionTimeout = SessionTimeout,
             SessionKeepAliveIntervalMs = SessionKeepAliveIntervalMs,
             ChannelLifetime = ChannelLifetime,
+            WarmupOnConnect = WarmupOnConnect,
             MaxMessageSize = MaxMessageSize,
             ErrorMode = ErrorMode,
             ReconnectMaxRetries = ReconnectMaxRetries,

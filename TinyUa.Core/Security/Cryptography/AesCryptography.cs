@@ -150,6 +150,15 @@ namespace TinyUa.Core.Security.Cryptography
         public byte[] Sign(byte[] data)
             => HMACSHA256.HashData(_localSigKey!, data);
 
+        public bool VerifyData(byte[] data, ReadOnlySpan<byte> signature)
+        {
+            using var hmac = IncrementalHash.CreateHMAC(HashAlgorithmName.SHA256, _remoteSigKey!);
+            hmac.AppendData(data);
+            Span<byte> expected = stackalloc byte[32];
+            hmac.GetHashAndReset(expected);
+            return CryptographicOperations.FixedTimeEquals(expected, signature);
+        }
+
         public void Verify(ReadOnlySpan<byte> header, ReadOnlySpan<byte> securityHeader,
             ReadOnlySpan<byte> body, ReadOnlySpan<byte> signature)
         {

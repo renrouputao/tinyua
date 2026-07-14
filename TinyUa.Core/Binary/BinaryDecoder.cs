@@ -188,8 +188,9 @@ namespace TinyUa.Core.Binary
             if (length == 0)
                 return string.Empty;
 
-            var bytes = ReadBytes(length);
-            return Encoding.UTF8.GetString(bytes);
+            // Decode directly from the internal buffer via a zero-copy span — avoids the
+            // intermediate byte[] allocation that ReadBytes would create for every string.
+            return Encoding.UTF8.GetString(ReadSpan(length));
         }
 
         /// <summary>
@@ -303,6 +304,26 @@ namespace TinyUa.Core.Binary
                 result[i] = readElement(this);
             }
             return result;
+        }
+
+        /// <summary>
+        /// Reads and validates a 32-bit array length prefix. Returns 0 for null/empty (length ≤ 0).
+        /// Throws if the length exceeds the remaining buffer (every element is at least 1 byte)
+        /// or a sane maximum to prevent hostile over-allocation.
+        /// </summary>
+        /// <param name="maxLength">Maximum number of elements allowed (default 1 Mi elements).</param>
+        /// <returns>The validated length, or 0 if the prefix was ≤ 0.</returns>
+        public int ReadArrayLength(int maxLength = 0x100000)
+        {
+            var length = ReadInt32();
+            if (length <= 0) return 0;
+            if (length > Remaining)
+                throw new InvalidOperationException(
+                    $"Array length {length} exceeds remaining buffer ({Remaining} bytes)");
+            if (length > maxLength)
+                throw new InvalidOperationException(
+                    $"Array length {length} exceeds maximum ({maxLength})");
+            return length;
         }
 
         /// <summary>

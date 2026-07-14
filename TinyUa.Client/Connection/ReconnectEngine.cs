@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using TinyUa.Core.Logging;
 using TinyUa.Core.Types;
+using TinyUa.Client.Security;
 using TinyUa.Client.Services;
 using TinyUa.Client.Subscriptions;
 using TinyUa.Transport;
@@ -215,9 +216,12 @@ namespace TinyUa.Client.Connection
             if (!sessionRecovered)
             {
 
-                await _connection.CreateSessionAsync(endpointUrl, _options.ApplicationName,
+                var createResponse = await _connection.CreateSessionAsync(endpointUrl, _options.ApplicationName,
                     _options.ApplicationUri, _options.ProductUri, (uint)_options.SessionTimeout).ConfigureAwait(false);
-                await _connection.ActivateSessionAsync(null ).ConfigureAwait(false);
+                var identity = UserIdentityFactory.Build(
+                    _options.Security.UserIdentity, createResponse, _connection.SecurityPolicy,
+                    _connection.UserTokenPolicyId);
+                await _connection.ActivateSessionAsync(identity).ConfigureAwait(false);
                 _logger.LogInformation("Reconnect: New session created");
             }
 

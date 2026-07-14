@@ -90,7 +90,7 @@ namespace TinyUa.Client.Services
                 DiscoveryProfileUri = decoder.ReadString()
             };
 
-            var urlCount = decoder.ReadInt32();
+            var urlCount = decoder.ReadArrayLength();
             if (urlCount > 0)
             {
                 desc.DiscoveryUrls = new string[urlCount];
@@ -236,7 +236,7 @@ namespace TinyUa.Client.Services
                     response.ServerEndpoints[i] = EndpointDescription.Decode(decoder);
             }
 
-            var certCount = decoder.ReadInt32();
+            var certCount = decoder.ReadArrayLength();
             for (int i = 0; i < certCount; i++)
             {
                 decoder.ReadByteString();

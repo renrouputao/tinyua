@@ -6,20 +6,51 @@ namespace TinyUa.Benchmarks;
 
 class Program
 {
-    const string DefaultUrl = "opc.tcp://localhost:4840";
+    const string DefaultUrl = "opc.tcp://localhost:49320";
 
     static async Task Main(string[] args)
     {
-        if (args.Length > 0 && args[0].Equals("security", StringComparison.OrdinalIgnoreCase))
-        {
-            await SecurityBenchmarks.RunAsync();
-            return;
-        }
-
-        var url = args.Length > 0 ? args[0] : DefaultUrl;
         Console.OutputEncoding = System.Text.Encoding.UTF8;
-        Console.WriteLine("TinyUa Benchmark");
+
+        // Subcommand dispatch: security | latency | kepware | basic [url]
+        var cmd = args.Length > 0 ? args[0].ToLowerInvariant() : "basic";
+
+        switch (cmd)
+        {
+            case "security":
+                await SecurityBenchmarks.RunAsync();
+                return;
+            case "latency":
+                await LatencyBenchmarks.RunAsync(args.Length > 1 ? args[1] : DefaultUrl);
+                return;
+            case "kepware":
+                await KepwareTest.RunAsync(args.Length > 1 ? args[1] : DefaultUrl);
+                return;
+            case "basic":
+            default:
+                // Treat first arg as url when it isn't a known subcommand
+                var url = args.Length > 0 && !IsKnownSubcommand(args[0]) ? args[0] : DefaultUrl;
+                await RunBasicBenchmarkAsync(url);
+                return;
+        }
+    }
+
+    static bool IsKnownSubcommand(string s)
+        => s.Equals("security", StringComparison.OrdinalIgnoreCase)
+           || s.Equals("latency", StringComparison.OrdinalIgnoreCase)
+           || s.Equals("kepware", StringComparison.OrdinalIgnoreCase)
+           || s.Equals("basic", StringComparison.OrdinalIgnoreCase);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  Basic benchmark: throughput-oriented (uses constructor-style API).
+    //  Usage: dotnet run --project TinyUa.Benchmarks -- [url]
+    //         dotnet run --project TinyUa.Benchmarks -- basic [url]
+    // ═══════════════════════════════════════════════════════════════════════
+    static async Task RunBasicBenchmarkAsync(string url)
+    {
+        Console.WriteLine("TinyUa Basic Benchmark");
         Console.WriteLine($"Server: {url}");
+        Console.WriteLine($"Runtime: {System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription}");
         Console.WriteLine();
 
         Console.WriteLine("--- TinyUa ---");
@@ -38,9 +69,7 @@ class Program
         Console.WriteLine($"  {"Size",5} {"TinyUa",8}");
         Console.WriteLine($"  {"-----",5} {"------",8}");
         foreach (var kv in ua.ReadSizes.OrderBy(x => x.Key))
-        {
             Console.WriteLine($"  {kv.Key,5} {kv.Value,7}us");
-        }
 
         Console.WriteLine();
         Console.WriteLine("Done.");
@@ -51,7 +80,8 @@ class Program
         var r = new Results();
         await using var client = new UaClient(url, new UaClientOptions
         {
-            ApplicationName = "TinyUa-Bench", Timeout = 15000
+            ApplicationName = "TinyUa-Bench",
+            Timeout = 15000
         });
         await client.RunAsync();
 
@@ -85,7 +115,7 @@ class Program
         var sw = Stopwatch.StartNew();
         for (int i = 0; i < repeat; i++) await client.ReadAsync(nodes);
         sw.Stop();
-        return sw.Elapsed.ToMicroseconds() /repeat;
+        return sw.Elapsed.ToMicroseconds() / repeat;
     }
 
     static async Task<long> BenchWriteAsync(UaClient client)
@@ -94,7 +124,7 @@ class Program
         for (int i = 0; i < 200; i++)
             try { await client.WriteAsync(new UaNodeId("ns=2;s=Demo.SimulationSpeed"), 50); } catch { }
         sw.Stop();
-        return sw.Elapsed.ToMicroseconds() /200;
+        return sw.Elapsed.ToMicroseconds() / 200;
     }
 
     static async Task<long> BenchBrowseAsync(UaClient client)
@@ -102,7 +132,7 @@ class Program
         var sw = Stopwatch.StartNew();
         for (int i = 0; i < 100; i++) await client.BrowseAsync(new UaNodeId(84, 0));
         sw.Stop();
-        return sw.Elapsed.ToMicroseconds() /100;
+        return sw.Elapsed.ToMicroseconds() / 100;
     }
 
     static async Task<long> BenchSubscribeAsync(UaClient client)

@@ -25,7 +25,17 @@ namespace TinyUa.Client.Subscriptions
         private int _inFlight;
         private int _maxInFlight = 2;
         private volatile bool _running;
+        private int _epoch;
         private Timer? _fallbackTimer;
+
+        /// <summary>
+        /// Per-Publish response timeout. A legitimate server always responds within
+        /// RevisedPublishingInterval × RevisedMaxKeepAliveCount (typically ~10s); 2 minutes gives
+        /// ample margin for slow servers while bounding recovery from a silently-dropped response.
+        /// Without this, a dropped Publish pins an in-flight slot forever (the 30s fallback timer
+        /// only tops up when _inFlight &lt; _maxInFlight, so it cannot recover a leaked slot).
+        /// </summary>
+        private static readonly TimeSpan PublishResponseTimeout = TimeSpan.FromMinutes(2);
 
         internal PublishEngine(SubscriptionRouter router, ILogger logger)
         {
@@ -66,8 +76,11 @@ namespace TinyUa.Client.Subscriptions
                     _running = false;
                     _fallbackTimer?.Dispose();
                     _fallbackTimer = null;
-                    // In-flight requests drain via their callbacks (which no-op once stopped);
-                    // resetting here lets a fresh attach start with a clean pool.
+                    // Increment the epoch so that in-flight callbacks from the now-stopped
+                    // generation do NOT decrement _inFlight — preventing negative counts.
+                    // Resetting _inFlight here lets a fresh attach start with a clean pool;
+                    // old callbacks see a mismatched epoch and skip the decrement.
+                    Interlocked.Increment(ref _epoch);
                     Volatile.Write(ref _inFlight, 0);
                     _logger.LogDebug("PublishEngine: stopped (no attached subscriptions)");
                 }
@@ -80,13 +93,14 @@ namespace TinyUa.Client.Subscriptions
             // or not-yet-connected transport) releases its in-flight slot immediately, so an
             // unbounded refill loop would spin hot forever. Any shortfall is recovered by the
             // response callbacks and the fallback timer.
+            int epoch = Volatile.Read(ref _epoch);
             for (int fired = 0; _running && fired < _maxInFlight;)
             {
                 int current = Volatile.Read(ref _inFlight);
                 if (current >= _maxInFlight) return;
                 if (Interlocked.CompareExchange(ref _inFlight, current + 1, current) != current) continue;
                 fired++;
-                SendOnePublishAsync().Forget(_logger, "PublishEngine.SendOnePublish");
+                SendOnePublishAsync(epoch).Forget(_logger, "PublishEngine.SendOnePublish");
             }
         }
 
@@ -113,37 +127,45 @@ namespace TinyUa.Client.Subscriptions
             }
         }
 
-        private async Task SendOnePublishAsync()
+        private async Task SendOnePublishAsync(int epoch)
         {
-            if (!_running)
+            if (!_running || epoch != Volatile.Read(ref _epoch))
             {
-                Interlocked.Decrement(ref _inFlight);
+                // Engine stopped or epoch changed between TopUp and here. Detach already
+                // reset _inFlight; do NOT decrement — that would produce a negative count.
                 return;
             }
 
             try
             {
-                await _router.SendPublishAsync(BuildAcknowledgements(), OnPublishResponse, OnPublishFaulted)
+                await _router.SendPublishAsync(BuildAcknowledgements(),
+                    body => OnPublishResponse(body, epoch),
+                    ex => OnPublishFaulted(ex, epoch),
+                    PublishResponseTimeout)
                     .ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 // Synchronous send failure: per the SendRequestNoWait contract no callback will
-                // fire, so the in-flight slot is released here (and only here).
-                Interlocked.Decrement(ref _inFlight);
+                // fire, so the in-flight slot is released here (and only here) — but only if
+                // the epoch hasn't changed (Detach already reset _inFlight).
+                if (epoch == Volatile.Read(ref _epoch))
+                    Interlocked.Decrement(ref _inFlight);
                 _logger.LogDebug(ex, "PublishEngine: publish send failed");
             }
         }
 
-        private void OnPublishFaulted(Exception ex)
+        private void OnPublishFaulted(Exception ex, int epoch)
         {
-            Interlocked.Decrement(ref _inFlight);
+            if (epoch == Volatile.Read(ref _epoch))
+                Interlocked.Decrement(ref _inFlight);
             _logger.LogDebug(ex, "PublishEngine: publish request faulted");
         }
 
-        private void OnPublishResponse(byte[] body)
+        private void OnPublishResponse(byte[] body, int epoch)
         {
-            Interlocked.Decrement(ref _inFlight);
+            if (epoch == Volatile.Read(ref _epoch))
+                Interlocked.Decrement(ref _inFlight);
             try
             {
                 var decoder = new BinaryDecoder(body);
@@ -170,7 +192,7 @@ namespace TinyUa.Client.Subscriptions
             }
             finally
             {
-                if (_running)
+                if (_running && epoch == Volatile.Read(ref _epoch))
                     TopUp();
             }
         }

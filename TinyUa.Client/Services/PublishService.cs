@@ -147,7 +147,7 @@ namespace TinyUa.Client.Services
             var message = new NotificationMessage();
             message.SequenceNumber = decoder.ReadUInt32();
             message.PublishTime = decoder.ReadDateTime();
-            var count = decoder.ReadInt32();
+            var count = decoder.ReadArrayLength();
             for (int i = 0; i < count; i++)
             {
                 message.NotificationData.Add(ExtensionObject.Decode(decoder));
@@ -193,7 +193,7 @@ namespace TinyUa.Client.Services
             }
             result.MoreNotifications = decoder.ReadBoolean();
             result.NotificationMessage = NotificationMessage.Decode(decoder);
-            var resultsCount = decoder.ReadInt32();
+            var resultsCount = decoder.ReadArrayLength();
             result.Results = resultsCount > 0 ? new StatusCode[resultsCount] : Array.Empty<StatusCode>();
             for (int i = 0; i < resultsCount; i++)
             {

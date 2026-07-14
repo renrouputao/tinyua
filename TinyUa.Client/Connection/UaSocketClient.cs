@@ -1,5 +1,6 @@
 using TinyUa.Core;
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net.Sockets;
@@ -37,9 +38,6 @@ namespace TinyUa.Client.Connection
         private uint _requestId;
         private uint _revisedChannelLifetime;
         private long _lastRequestTicks = Environment.TickCount64;
-
-        private readonly byte[] _headerBuffer = new byte[8];
-        private readonly byte[] _channelIdBuffer = new byte[4];
 
         internal NodeId AuthenticationToken { get; set; }
         internal bool DebugMode { get; set; }
@@ -302,6 +300,14 @@ namespace TinyUa.Client.Connection
             }
 
             var requestId = Interlocked.Increment(ref _requestId);
+            // RunContinuationsAsynchronously is the safe default for a public SDK: the receive
+            // loop calls TrySetResult, and we cannot assume the awaiter's continuation (which may
+            // chain into user code via subscriptions, callbacks, etc.) is trivial or lock-free.
+            // Inline continuation (TaskCreationOptions.None) is faster — ~10-30μs saved per
+            // request by skipping a ThreadPool dispatch — but risks stack dives, reentrancy, and
+            // deadlocks if any future feature runs non-trivial code on the completion path.
+            // TinyUa targets broad reuse, so we prefer stability over microsecond-level latency
+            // and stay consistent with SendEncodedBodyAsync below.
             var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
 
             byte[] message;
@@ -365,7 +371,7 @@ namespace TinyUa.Client.Connection
         /// <paramref name="callback"/> (response received) or <paramref name="onError"/>
         /// (request faulted/cancelled, e.g. on disconnect) eventually fires.
         /// </summary>
-        internal async Task SendRequestNoWait<T>(T request, Action<byte[]>? callback = null, byte[]? messageType = null, Action<Exception>? onError = null) where T : IEncodable
+        internal async Task SendRequestNoWait<T>(T request, Action<byte[]>? callback = null, byte[]? messageType = null, Action<Exception>? onError = null, TimeSpan? responseTimeout = null) where T : IEncodable
         {
             messageType ??= MessageType.SecureMessage;
 
@@ -421,16 +427,42 @@ namespace TinyUa.Client.Connection
             // races a callback. A response that already arrived just completes the awaited task.
             if (callback != null || onError != null)
             {
-                InvokeCallbackAsync(tcs.Task, callback, onError).Forget(_logger, nameof(InvokeCallbackAsync));
+                InvokeCallbackAsync(tcs.Task, callback, onError, responseTimeout, (uint)requestId).Forget(_logger, nameof(InvokeCallbackAsync));
             }
         }
 
-        private async Task InvokeCallbackAsync(Task<byte[]> task, Action<byte[]>? callback, Action<Exception>? onError)
+        private async Task InvokeCallbackAsync(Task<byte[]> task, Action<byte[]>? callback, Action<Exception>? onError, TimeSpan? responseTimeout, uint requestId)
         {
             byte[] result;
             try
             {
-                result = await task.ConfigureAwait(false);
+                // When a response timeout is requested (e.g. for Publish long-polls), bound the
+                // wait so a silently-dropped response cannot pin an in-flight slot forever. The
+                // underlying tcs stays in _callbacks until either the response arrives (TrySetResult
+                // is a no-op on the already-timed-out wrapper) or the timeout handler removes it.
+                if (responseTimeout is { } timeout)
+                    result = await task.WaitAsync(timeout).ConfigureAwait(false);
+                else
+                    result = await task.ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                // Release the callback slot so a late response doesn't try to complete an already-
+                // abandoned tcs (TrySetResult would be a no-op anyway, but this frees the entry for
+                // GC and avoids a "no callback found" debug log on the receive loop). Then surface
+                // the timeout via onError so the caller can release its in-flight slot / retry.
+                _callbacks.TryRemove(requestId, out _);
+                var ts = responseTimeout!.Value;
+                if (onError != null)
+                {
+                    try { onError(new TimeoutException($"No response for request {requestId} within {ts.TotalSeconds:F0}s")); }
+                    catch (Exception cbEx) { _logger.LogError(cbEx, "SendRequestNoWait error callback failed (timeout)"); }
+                }
+                else
+                {
+                    _logger.LogDebug($"SendRequestNoWait request {requestId} timed out after {ts.TotalSeconds:F0}s (no error callback)");
+                }
+                return;
             }
             catch (Exception ex)
             {
@@ -515,124 +547,171 @@ namespace TinyUa.Client.Connection
 
         private async Task ReceiveLoopAsync(CancellationToken ct)
         {
-            _logger.LogDebug("Receive loop started (async)");
+            _logger.LogDebug("Receive loop started (buffered)");
             Exception? exitException = null;
+
+            // A single pooled buffer holds all bytes read but not yet parsed. One ReadAsync
+            // pulls as much data as the kernel has ready (commonly several messages at once),
+            // and we drain every complete message from the buffer before asking for more.
+            // This replaces the previous pattern of one ReadAsync per header (8B), one per
+            // channel id (4B) and one per body — at least three syscalls per message — with
+            // a single buffered read, while keeping the zero-external-dependency story intact
+            // (System.IO.Pipelines is not part of the net8.0 NETCore.App shared framework).
+            byte[] buf = ArrayPool<byte>.Shared.Rent(8192);
+            int len = 0;   // count of valid bytes in buf
+            int pos = 0;   // parse cursor; bytes [0, pos) are already consumed
 
             try
             {
                 var debugEnabled = _logger.IsEnabled(LogLevel.Debug);
+
                 while (_running && !ct.IsCancellationRequested)
                 {
-                    var header = await ReadHeaderAsync(ct);
-                    if (header == null)
+                    // Compact already-parsed bytes out of the front so the next read has room
+                    // in the tail. Array.Copy is documented to behave correctly when source
+                    // and destination overlap.
+                    if (pos > 0)
                     {
-                        _logger.LogWarning("Receive loop: stream closed by remote (FIN received)");
-                        break;
+                        if (pos < len)
+                            Array.Copy(buf, pos, buf, 0, len - pos);
+                        len -= pos;
+                        pos = 0;
                     }
 
-                    if (debugEnabled)
-                        _logger.LogDebug($"Received header: {header}");
-
-                    const int MaxBodySize = 16 * 1024 * 1024;
-                    if (header.BodySize < 0 || header.BodySize > MaxBodySize)
+                    // Pull more data from the socket whenever there is room.
+                    if (len < buf.Length)
                     {
-                        _logger.LogError($"Invalid BodySize: {header.BodySize}, closing connection");
-                        break;
-                    }
-
-                    var body = new byte[header.BodySize];
-                    var read = 0;
-                    while (read < body.Length)
-                    {
-                        var bytesRead = await _stream!.ReadAsync(body, read, body.Length - read, ct);
-                        if (bytesRead == 0) break;
-                        read += bytesRead;
-                    }
-                    if (read < body.Length)
-                    {
-                        _logger.LogWarning($"Incomplete body read: {read}/{body.Length}, closing connection");
-                        break;
-                    }
-
-                    if (debugEnabled)
-                        _logger.LogDebug($"Received body: {body.Length} bytes");
-
-                    object? message;
-                    try
-                    {
-                        message = _connection.ReceiveFromHeaderAndBody(header, body);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, $"Receive loop: message parsing failed (header={header}), attempting to fault callback and continue");
-
-                        if (header.IsSecureMessage && body.Length >= 12)
+                        int n;
+                        try
                         {
-                            try
-                            {
-                                var reqId = BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(8));
-                                if (_callbacks.TryRemove(reqId, out var tcs))
-                                {
-                                    tcs.TrySetException(ex);
-                                    if (debugEnabled)
-                                        _logger.LogDebug($"Faulted callback for request {reqId} after parse failure");
-                                }
-                            }
-                            catch { }
+                            // Apply a receive deadline: if no bytes arrive within 60s the peer is
+                            // either dead or slow-drip-feeding partial frames to keep the loop
+                            // alive. TCP keepalive catches fully dead sockets (~25s), but a
+                            // drip-feed attacker keeps the TCP connection alive while starving
+                            // the application layer. Closing the socket forces reconnect.
+                            n = await _stream!.ReadAsync(buf, len, buf.Length - len, ct)
+                                .WaitAsync(TimeSpan.FromSeconds(60), ct)
+                                .ConfigureAwait(false);
                         }
-                        else
+                        catch (OperationCanceledException)
                         {
-
-                            foreach (var callback in _callbacks.Values)
-                                callback.TrySetException(ex);
+                            _logger.LogDebug("Receive loop cancelled");
+                            break;
                         }
-                        continue;
+                        catch (TimeoutException)
+                        {
+                            _logger.LogWarning("Receive loop: no data for 60s, closing connection (possible slow-drip or dead peer)");
+                            break;
+                        }
+
+                        if (n == 0)
+                        {
+                            // Remote end sent FIN. Any trailing bytes are an incomplete message.
+                            if (len > 0)
+                                _logger.LogWarning($"Receive loop: stream closed by remote (FIN received) with {len} bytes trailing");
+                            else
+                                _logger.LogWarning("Receive loop: stream closed by remote (FIN received)");
+                            break;
+                        }
+
+                        len += n;
                     }
 
-                    if (debugEnabled)
-                        _logger.LogDebug($"Parsed message: {message?.GetType().Name ?? "null"}");
-
-                    if (message is Message msg)
+                    // Drain every complete message currently buffered. TryParseMessage returns
+                    // false (leaving pos untouched) when only a partial message remains.
+                    while (TryParseMessage(buf, pos, len, out int msgLen, out var header, out byte[] body))
                     {
                         if (debugEnabled)
-                            _logger.LogDebug($"Message RequestId: {msg.RequestId}");
-
-                        if (_callbacks.TryRemove(msg.RequestId, out var tcs))
                         {
-                            tcs.TrySetResult(msg.Body);
+                            _logger.LogDebug($"Received header: {header}");
+                            _logger.LogDebug($"Received body: {body.Length} bytes");
                         }
-                        else
+
+                        object? message;
+                        try
+                        {
+                            message = _connection.ReceiveFromHeaderAndBody(header, body);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, $"Receive loop: message parsing failed (header={header}), attempting to fault callback and continue");
+
+                            if (header.IsSecureMessage && body.Length >= 12)
+                            {
+                                try
+                                {
+                                    var reqId = BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(8));
+                                    if (_callbacks.TryRemove(reqId, out var tcs))
+                                    {
+                                        tcs.TrySetException(ex);
+                                        if (debugEnabled)
+                                            _logger.LogDebug($"Faulted callback for request {reqId} after parse failure");
+                                    }
+                                }
+                                catch { }
+                            }
+                            else
+                            {
+                                foreach (var callback in _callbacks.Values)
+                                    callback.TrySetException(ex);
+                            }
+
+                            // The frame was parsed off the wire; advance past it so we do not
+                            // retry the same bad message forever.
+                            pos += msgLen;
+                            continue;
+                        }
+
+                        if (debugEnabled)
+                            _logger.LogDebug($"Parsed message: {message?.GetType().Name ?? "null"}");
+
+                        if (message is Message msg)
                         {
                             if (debugEnabled)
+                                _logger.LogDebug($"Message RequestId: {msg.RequestId}");
+
+                            if (_callbacks.TryRemove(msg.RequestId, out var tcs))
+                            {
+                                tcs.TrySetResult(msg.Body);
+                            }
+                            else if (debugEnabled)
                             {
                                 _logger.LogDebug($"No callback found for request {msg.RequestId}");
                             }
                         }
-                    }
-                    else if (message is ErrorMessage err)
-                    {
-                        _logger.LogWarning($"Error message received: StatusCode=0x{err.Error.Value:X8}, Reason={err.Reason}");
-
-                        foreach (var callback in _callbacks.Values)
+                        else if (message is ErrorMessage err)
                         {
-                            callback.TrySetException(new UaException(err.Error.Value,
-                                $"Server ErrorMessage: Code=0x{err.Error.Value:X8}, Reason={err.Reason ?? "(null)"}"));
+                            _logger.LogWarning($"Error message received: StatusCode=0x{err.Error.Value:X8}, Reason={err.Reason}");
+
+                            foreach (var callback in _callbacks.Values)
+                            {
+                                callback.TrySetException(new UaException(err.Error.Value,
+                                    $"Server ErrorMessage: Code=0x{err.Error.Value:X8}, Reason={err.Reason ?? "(null)"}"));
+                            }
                         }
+
+                        pos += msgLen;
+                    }
+
+                    // If the buffer is full but we still couldn't parse a complete message,
+                    // grow it so the next read can accommodate the rest of the partial message.
+                    if (pos == 0 && len == buf.Length)
+                    {
+                        var grown = ArrayPool<byte>.Shared.Rent(buf.Length * 2);
+                        Buffer.BlockCopy(buf, 0, grown, 0, len);
+                        ArrayPool<byte>.Shared.Return(buf);
+                        buf = grown;
                     }
                 }
-            }
-            catch (OperationCanceledException)
-            {
-                _logger.LogDebug("Receive loop cancelled");
             }
             catch (Exception ex)
             {
                 exitException = ex;
                 _logger.LogWarning(ex, "Receive loop exiting due to exception — socket is now dead");
-
             }
             finally
             {
+                ArrayPool<byte>.Shared.Return(buf);
 
                 var unexpectedExit = _running;
 
@@ -657,34 +736,78 @@ namespace TinyUa.Client.Connection
             }
         }
 
-        private async Task<Header?> ReadHeaderAsync(CancellationToken ct)
+        /// <summary>
+        /// Attempts to parse one complete message from the front of the receive buffer
+        /// <paramref name="buf"/> starting at offset <paramref name="pos"/> (with <paramref name="len"/>
+        /// valid bytes total). On success, returns the decoded <see cref="Header"/>, a freshly
+        /// allocated body byte array and the total number of bytes consumed in
+        /// <paramref name="msgLen"/>. Returns false (without modifying the caller's cursor) when
+        /// the buffer does not yet hold a full message, so the caller can request more data from
+        /// the socket.
+        /// </summary>
+        private bool TryParseMessage(byte[] buf, int pos, int len,
+            out int msgLen, out Header? header, out byte[] body)
         {
-            if (_stream == null) return null;
+            msgLen = 0;
+            header = null;
+            body = Array.Empty<byte>();
 
-            var read = 0;
-            while (read < 8)
+            int available = len - pos;
+            if (available < 8)
+                return false;
+
+            // Header field: PacketSize is the little-endian uint32 at offset 4 from the frame start.
+            uint packetSize = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(pos + 4, 4));
+
+            // Guard against malformed/adversarial sizes BEFORE the "need more data" check, so a
+            // bad frame is rejected immediately rather than forcing the buffer to grow unbounded.
+            const int MaxPacketSize = 8 + 4 + 16 * 1024 * 1024; // header + channelId + 16 MiB body
+            if (packetSize < 8 || packetSize > MaxPacketSize)
+                throw new InvalidOperationException($"Invalid PacketSize: {packetSize}");
+
+            // Wait until the entire message (header + channel id + body) is buffered.
+            if (available < packetSize)
+                return false;
+
+            var msgType = new byte[3] { buf[pos], buf[pos + 1], buf[pos + 2] };
+            byte chunkType = buf[pos + 3];
+            bool isSecure = MessageType.Equals(msgType, MessageType.SecureMessage)
+                         || MessageType.Equals(msgType, MessageType.SecureOpen)
+                         || MessageType.Equals(msgType, MessageType.SecureClose);
+
+            int bodySize = (int)packetSize - 8;
+            long offset = 8;
+            uint channelId = 0;
+            if (isSecure)
             {
-                var bytesRead = await _stream!.ReadAsync(_headerBuffer, read, 8 - read, ct);
-                if (bytesRead == 0) return null;
-                read += bytesRead;
+                if (packetSize < 12)
+                    throw new InvalidOperationException($"Invalid PacketSize for secure message: {packetSize} (minimum 12)");
+                bodySize -= 4; // the 4-byte channel id is not part of BodySize
+                channelId = BinaryPrimitives.ReadUInt32LittleEndian(buf.AsSpan(pos + 8, 4));
+                offset = 12;
             }
 
-            var decoder = new BinaryDecoder(_headerBuffer);
-            var header = Header.Decode(decoder);
+            const int MaxBodySize = 16 * 1024 * 1024;
+            if (bodySize < 0 || bodySize > MaxBodySize)
+                throw new InvalidOperationException($"Invalid BodySize: {bodySize}");
 
-            if (header.IsSecureMessage || header.IsSecureOpen || header.IsSecureClose)
+            header = new Header
             {
-                read = 0;
-                while (read < 4)
-                {
-                    var bytesRead = await _stream!.ReadAsync(_channelIdBuffer, read, 4 - read, ct);
-                    if (bytesRead == 0) return null;
-                    read += bytesRead;
-                }
-                header.ChannelId = BinaryPrimitives.ReadUInt32LittleEndian(_channelIdBuffer);
+                MessageType = msgType,
+                ChunkType = chunkType,
+                PacketSize = packetSize,
+                BodySize = bodySize,
+                ChannelId = channelId
+            };
+
+            if (bodySize > 0)
+            {
+                body = new byte[bodySize];
+                Buffer.BlockCopy(buf, pos + (int)offset, body, 0, bodySize);
             }
 
-            return header;
+            msgLen = (int)packetSize;
+            return true;
         }
 
         public void Dispose()

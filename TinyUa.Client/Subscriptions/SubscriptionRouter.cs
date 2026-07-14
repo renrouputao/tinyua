@@ -102,10 +102,11 @@ namespace TinyUa.Client.Subscriptions
         /// Sends one Publish request for the session (fire-and-forget). Per the underlying
         /// SendRequestNoWait contract: a synchronous throw means neither callback fires;
         /// otherwise exactly one of <paramref name="onResponse"/> / <paramref name="onError"/>
-        /// eventually fires.
+        /// eventually fires. <paramref name="responseTimeout"/> bounds the wait so a silently-
+        /// dropped Publish response cannot pin an in-flight slot forever.
         /// </summary>
         internal Task SendPublishAsync(SubscriptionAcknowledgement[] acknowledgements,
-            Action<byte[]> onResponse, Action<Exception> onError)
+            Action<byte[]> onResponse, Action<Exception> onError, TimeSpan? responseTimeout = null)
         {
             var request = new PublishRequest
             {
@@ -113,7 +114,7 @@ namespace TinyUa.Client.Subscriptions
                 RequestHeader = _connection.CreateRequestHeader(timeoutHint: 0),
                 Parameters = new PublishParameters { SubscriptionAcknowledgements = acknowledgements }
             };
-            return _connection.SendRequestNoWaitAsync(request, onResponse, onError);
+            return _connection.SendRequestNoWaitAsync(request, onResponse, onError, responseTimeout);
         }
     }
 }

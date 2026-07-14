@@ -197,7 +197,7 @@ namespace TinyUa.Client.Services
                 ResponseHeader = ResponseHeader.Decode(decoder)
             };
 
-            var count = decoder.ReadInt32();
+            var count = decoder.ReadArrayLength();
             if (count > 0)
             {
                 response.Results = new DataValue[count];

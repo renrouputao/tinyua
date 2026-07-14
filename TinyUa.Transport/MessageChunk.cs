@@ -104,29 +104,35 @@ namespace TinyUa.Transport
                 return;
 
             var crypto = chunk.Cryptography;
-            if (crypto.RemoteSignatureSize > 0 && decoder.Remaining >= crypto.RemoteSignatureSize)
+            if (crypto.RemoteSignatureSize == 0)
             {
-                var decrypted = crypto.Decrypt(decoder.ReadRemainingSpan());
-
-                int sigLen = crypto.RemoteSignatureSize;
-                var plaintext = decrypted.AsSpan(0, decrypted.Length - sigLen);
-                var signature = decrypted.AsSpan(decrypted.Length - sigLen);
-
-                var headerBytes = EncodeHeaderToBytes(chunk.MessageHeader);
-                var securityBytes = EncodeSecurityHeaderToBytes(chunk.SecurityHeader);
-                crypto.Verify(headerBytes, securityBytes, plaintext, signature);
-
-                int padSize = crypto.GetPaddingSize(plaintext);
-                var bodyDecoder = new BinaryDecoder(decrypted, 0, plaintext.Length - padSize);
-                chunk.SequenceHeader = SequenceHeader.Decode(bodyDecoder);
-                chunk.Body = bodyDecoder.GetRemainingBytes();
-            }
-            else
-            {
-                // Unsecured (None / not yet keyed) payload: sequence header + body in the clear.
+                // Unsecured (None policy / not yet keyed): sequence header + body in the clear.
                 chunk.SequenceHeader = SequenceHeader.Decode(decoder);
                 chunk.Body = decoder.GetRemainingBytes();
+                return;
             }
+
+            // Security policy requires a signature. A frame whose ciphertext is shorter than the
+            // signature size is truncated or adversarial — it must NOT fall through to the
+            // plaintext branch, as that would bypass decryption and signature verification.
+            if (decoder.Remaining < crypto.RemoteSignatureSize)
+                throw new CryptographicException(
+                    $"Ciphertext ({decoder.Remaining} bytes) is shorter than signature size ({crypto.RemoteSignatureSize} bytes) — truncated or forged frame");
+
+            var decrypted = crypto.Decrypt(decoder.ReadRemainingSpan());
+
+            int sigLen = crypto.RemoteSignatureSize;
+            var plaintext = decrypted.AsSpan(0, decrypted.Length - sigLen);
+            var signature = decrypted.AsSpan(decrypted.Length - sigLen);
+
+            var headerBytes = EncodeHeaderToBytes(chunk.MessageHeader);
+            var securityBytes = EncodeSecurityHeaderToBytes(chunk.SecurityHeader);
+            crypto.Verify(headerBytes, securityBytes, plaintext, signature);
+
+            int padSize = crypto.GetPaddingSize(plaintext);
+            var bodyDecoder = new BinaryDecoder(decrypted, 0, plaintext.Length - padSize);
+            chunk.SequenceHeader = SequenceHeader.Decode(bodyDecoder);
+            chunk.Body = bodyDecoder.GetRemainingBytes();
         }
 
         internal byte[] ToBinary()

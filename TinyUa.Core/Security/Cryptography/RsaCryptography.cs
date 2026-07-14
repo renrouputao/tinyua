@@ -100,6 +100,10 @@ namespace TinyUa.Core.Security.Cryptography
             if (data.Length == _localKeySize)
                 return _localPrivateKey.Decrypt(data, _encryptionPadding);
 
+            if (data.Length % _localKeySize != 0)
+                throw new CryptographicException(
+                    $"Ciphertext length ({data.Length}) is not a multiple of the key size ({_localKeySize}) — truncated or forged data");
+
             int blockCount = data.Length / _localKeySize;
             using var ms = new System.IO.MemoryStream(blockCount * (_localKeySize - _oaepOverhead));
             for (int i = 0; i < blockCount; i++)
@@ -112,6 +116,9 @@ namespace TinyUa.Core.Security.Cryptography
 
         public byte[] Sign(byte[] data)
             => _localPrivateKey.SignData(data, _signatureHash, _signaturePadding);
+
+        public bool VerifyData(byte[] data, ReadOnlySpan<byte> signature)
+            => _remotePublicKey.VerifyData(data, signature, _signatureHash, _signaturePadding);
 
         public void Verify(ReadOnlySpan<byte> header, ReadOnlySpan<byte> securityHeader,
             ReadOnlySpan<byte> body, ReadOnlySpan<byte> signature)

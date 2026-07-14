@@ -118,6 +118,8 @@ namespace TinyUa.Client.Connection
                 }
             }
 
+            _connection.UserTokenPolicyId = userTokenPolicyId;
+
             var policy = SecurityPolicyFactory.Create(security.Policy, localCert, remoteCert, resolvedMode);
             _connection.SetSecurityPolicy(policy);
 

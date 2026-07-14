@@ -276,7 +276,7 @@ namespace TinyUa.Client.Services
                 ContinuationPoint = decoder.ReadByteString()
             };
 
-            var count = decoder.ReadInt32();
+            var count = decoder.ReadArrayLength();
             if (count > 0)
             {
                 result.References = new ReferenceDescription[count];

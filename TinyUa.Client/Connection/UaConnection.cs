@@ -28,6 +28,7 @@ namespace TinyUa.Client.Connection
 
         internal NodeId? SessionId => _sessionId;
         internal NodeId? AuthenticationToken => _authenticationToken;
+        internal string? UserTokenPolicyId { get; set; }
         internal uint RevisedChannelLifetime => _socket?.RevisedChannelLifetime ?? 3600000;
 
             internal bool IsAlive => _socket?.IsAlive ?? false;
@@ -194,6 +195,16 @@ namespace TinyUa.Client.Connection
                 }
             };
             var response = await InvokeAsync<CreateSessionRequest, CreateSessionResponse>(request).ConfigureAwait(false);
+
+            // Verify the server's signature before trusting the response. Per OPC UA Part 4 §5.6.2,
+            // the server signs clientCertificate || clientNonce with its private key, proving it
+            // holds the key for the certificate it presented. Without this check, an attacker who
+            // can inject a CreateSessionResponse (e.g. via a hijacked channel) could feed the
+            // client a fake server nonce/certificate. The OPN verify already proves key ownership
+            // at channel-open time; this re-proves it at session-creation time over the client's
+            // nonce, binding the session to the authenticated channel.
+            VerifyServerSignature(response.ServerSignature, _securityPolicy.SenderCertificate, clientNonce);
+
             _sessionId = response.SessionId;
             _authenticationToken = response.AuthenticationToken;
 
@@ -248,6 +259,36 @@ namespace TinyUa.Client.Connection
             if (uri.EndsWith("#Aes256_Sha256_RsaPss"))
                 return "http://opcfoundation.org/UA/security/rsa-pss-sha2-256";
             return "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";
+        }
+
+        /// <summary>
+        /// Verifies the ServerSignature returned in CreateSessionResponse. Per OPC UA Part 4
+        /// §5.6.2, the signed data is clientCertificate || clientNonce. A secure policy that
+        /// receives no signature, or a signature that does not validate, is treated as a
+        /// channel-compromise (possible MITM) and rejected. None policy skips verification.
+        /// </summary>
+        private void VerifyServerSignature(SignatureData? serverSignature, byte[]? clientCertificate, byte[] clientNonce)
+        {
+            var asymCrypto = _securityPolicy.AsymmetricCryptography;
+            if (asymCrypto.RemoteSignatureSize == 0)
+                return; // None policy — server does not sign
+
+            var signature = serverSignature?.Signature;
+            if (signature == null || signature.Length == 0)
+                throw new CryptographicException(
+                    "Server signature is missing in CreateSession response — the server must sign clientCertificate||clientNonce for secure policies");
+
+            // Build the signed data: clientCertificate || clientNonce (same order as the server
+            // signs per spec; mirrors ComputeClientSignature which signs serverCertificate||serverNonce).
+            var clientCert = clientCertificate ?? Array.Empty<byte>();
+            var signedData = new byte[clientCert.Length + clientNonce.Length];
+            Buffer.BlockCopy(clientCert, 0, signedData, 0, clientCert.Length);
+            if (clientNonce.Length > 0)
+                Buffer.BlockCopy(clientNonce, 0, signedData, clientCert.Length, clientNonce.Length);
+
+            if (!asymCrypto.VerifyData(signedData, signature))
+                throw new CryptographicException(
+                    "Server signature verification failed — the server may not hold the private key for its certificate (possible MITM)");
         }
 
         internal async Task<NotificationMessage> RepublishAsync(uint subscriptionId, uint sequenceNumber)
@@ -360,8 +401,8 @@ namespace TinyUa.Client.Connection
             return TResponse.Decode(decoder);
         }
 
-        internal Task SendRequestNoWaitAsync<T>(T request, Action<byte[]>? callback = null, Action<Exception>? onError = null) where T : IEncodable
-            => _socket!.SendRequestNoWait(request, callback, null, onError);
+        internal Task SendRequestNoWaitAsync<T>(T request, Action<byte[]>? callback = null, Action<Exception>? onError = null, TimeSpan? responseTimeout = null) where T : IEncodable
+            => _socket!.SendRequestNoWait(request, callback, null, onError, responseTimeout);
 
         internal byte[] PrepareEncodedReadRequest(NodeId[] nodeIds, AttributeId attributeId = AttributeId.Value)
         {

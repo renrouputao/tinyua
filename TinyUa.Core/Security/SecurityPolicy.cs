@@ -52,6 +52,14 @@ namespace TinyUa.Core.Security
         byte[] Sign(byte[] data);
 
         /// <summary>
+        /// Verifies a signature over arbitrary data using the remote party's public key.
+        /// Used for CreateSession ServerSignature verification (OPC UA Part 4 §5.6.2).
+        /// Returns true if the signature is valid, false otherwise. None-policy implementations
+        /// return true (no signature to verify).
+        /// </summary>
+        bool VerifyData(byte[] data, ReadOnlySpan<byte> signature);
+
+        /// <summary>
         /// Verifies the remote signature computed over the concatenation
         /// header | securityHeader | body, without requiring the caller to materialize it.
         /// </summary>
@@ -79,6 +87,7 @@ namespace TinyUa.Core.Security
 
         public byte[] Padding(int dataSize) => Array.Empty<byte>();
         public byte[] Sign(byte[] data) => Array.Empty<byte>();
+        public bool VerifyData(byte[] data, ReadOnlySpan<byte> signature) => true;
         public void Verify(ReadOnlySpan<byte> header, ReadOnlySpan<byte> securityHeader,
             ReadOnlySpan<byte> body, ReadOnlySpan<byte> signature) { }
         public byte[] Encrypt(byte[] data) => data;
