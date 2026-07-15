@@ -137,102 +137,128 @@ namespace TinyUa.Transport
 
         internal byte[] ToBinary()
         {
+            using var wire = ToBufferLease();
+            return wire.Memory.ToArray();
+        }
+
+        /// <summary>
+        /// Produces a leased wire chunk for the transport. The caller must retain the lease until
+        /// the socket write completes; this keeps transient secure-message packets out of the GC.
+        /// </summary>
+        internal BufferLease ToBufferLease()
+        {
 
             if (Cryptography.SignatureSize == 0 && Cryptography.PlainBlockSize <= 1
                 && SecurityHeader is SymmetricAlgorithmHeader sym)
             {
 
                 int totalSize = 24 + Body.Length;
-                var result = new byte[totalSize];
+                var result = BufferLease.Rent(totalSize);
+                var bytes = result.Array;
 
                 var mt = MessageHeader.MessageType;
-                result[0] = mt[0];
-                result[1] = mt[1];
-                result[2] = mt[2];
-                result[3] = MessageHeader.ChunkType;
+                bytes[0] = mt[0];
+                bytes[1] = mt[1];
+                bytes[2] = mt[2];
+                bytes[3] = MessageHeader.ChunkType;
 
                 int bodySize = 12 + Body.Length;
-                BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(4), (uint)(bodySize + 12));
-                BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(8), MessageHeader.ChannelId);
+                BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4), (uint)(bodySize + 12));
+                BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(8), MessageHeader.ChannelId);
 
-                BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(12), sym.TokenId);
+                BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(12), sym.TokenId);
 
-                BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(16), SequenceHeader.SequenceNumber);
-                BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(20), SequenceHeader.RequestId);
+                BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(16), SequenceHeader.SequenceNumber);
+                BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(20), SequenceHeader.RequestId);
 
                 if (Body.Length > 0)
-                    Buffer.BlockCopy(Body, 0, result, 24, Body.Length);
+                    Buffer.BlockCopy(Body, 0, bytes, 24, Body.Length);
 
                 MessageHeader.BodySize = bodySize;
+                result.Length = totalSize;
                 return result;
             }
 
             var encoder = RentEncoder();
+            var headerEncoder = RentEncoder();
             var securityEncoder = RentEncoder();
             var bodyEncoder = RentEncoder();
             try
             {
                 SecurityHeader.Encode(securityEncoder);
-                byte[] securityBytes = securityEncoder.ToByteArray();
+                var securityBytes = securityEncoder.GetBuffer();
 
                 SequenceHeader.Encode(bodyEncoder);
                 bodyEncoder.WriteBytes(Body);
-                byte[] bodyBytes = bodyEncoder.ToByteArray();
+                int bodyLength = bodyEncoder.Length;
 
                 if (Cryptography.SignatureSize > 0 || Cryptography.PlainBlockSize > 1)
                 {
-                    var padding = Cryptography.Padding(bodyBytes.Length);
-                    var paddedBody = new byte[bodyBytes.Length + padding.Length];
-                    Array.Copy(bodyBytes, paddedBody, bodyBytes.Length);
-                    Array.Copy(padding, 0, paddedBody, bodyBytes.Length, padding.Length);
+                    var padding = Cryptography.Padding(bodyLength);
+                    bodyEncoder.WriteBytes(padding);
+                    var paddedBody = bodyEncoder.GetBuffer();
 
-                    int plainSize = paddedBody.Length + Cryptography.SignatureSize;
+                    int plainSize = paddedBody.Count + Cryptography.SignatureSize;
                     int encryptedSize = Cryptography.PlainBlockSize > 1
                         ? (plainSize / Cryptography.PlainBlockSize) * Cryptography.EncryptedBlockSize
                         : plainSize;
 
-                    MessageHeader.BodySize = securityBytes.Length + encryptedSize;
+                    MessageHeader.BodySize = securityBytes.Count + encryptedSize;
 
-                    MessageHeader.Encode(encoder);
-                    byte[] headerBytes = encoder.ToByteArray();
-                    encoder.Reset();
+                    MessageHeader.Encode(headerEncoder);
+                    var headerBytes = headerEncoder.GetBuffer();
 
-                    var signedData = new byte[headerBytes.Length + securityBytes.Length + paddedBody.Length];
-                    Buffer.BlockCopy(headerBytes, 0, signedData, 0, headerBytes.Length);
-                    Buffer.BlockCopy(securityBytes, 0, signedData, headerBytes.Length, securityBytes.Length);
-                    Buffer.BlockCopy(paddedBody, 0, signedData, headerBytes.Length + securityBytes.Length, paddedBody.Length);
-                    var signature = Cryptography.Sign(signedData);
+                    var signature = Cryptography.Sign(headerBytes.AsSpan(), securityBytes.AsSpan(), paddedBody.AsSpan());
 
                     if (SecurityDebugLogger.IsDebugEnabled && SecurityHeader is AsymmetricAlgorithmHeader asymForVerify)
+                    {
+                        // The diagnostic verifier is intentionally off the hot path; only it
+                        // needs a contiguous signed payload for RSA's public verification API.
+                        var signedData = new byte[headerBytes.Count + securityBytes.Count + paddedBody.Count];
+                        Buffer.BlockCopy(headerBytes.Array!, headerBytes.Offset, signedData, 0, headerBytes.Count);
+                        Buffer.BlockCopy(securityBytes.Array!, securityBytes.Offset, signedData, headerBytes.Count, securityBytes.Count);
+                        Buffer.BlockCopy(paddedBody.Array!, paddedBody.Offset, signedData, headerBytes.Count + securityBytes.Count, paddedBody.Count);
                         OpnDiagnostics.SelfVerify(asymForVerify, signedData, signature);
+                    }
 
-                    var plaintextWithSig = new byte[paddedBody.Length + signature.Length];
-                    Buffer.BlockCopy(paddedBody, 0, plaintextWithSig, 0, paddedBody.Length);
-                    Buffer.BlockCopy(signature, 0, plaintextWithSig, paddedBody.Length, signature.Length);
-                    var encrypted = Cryptography.Encrypt(plaintextWithSig);
+                    var plaintextWithSig = new byte[paddedBody.Count + signature.Length];
+                    Buffer.BlockCopy(paddedBody.Array!, paddedBody.Offset, plaintextWithSig, 0, paddedBody.Count);
+                    Buffer.BlockCopy(signature, 0, plaintextWithSig, paddedBody.Count, signature.Length);
+                    var encrypted = Cryptography.TryEncryptInPlace(plaintextWithSig)
+                        ? plaintextWithSig
+                        : Cryptography.Encrypt(plaintextWithSig);
 
-                    encoder.WriteBytes(headerBytes);
-                    encoder.WriteBytes(securityBytes);
+                    encoder.WriteBytes(headerBytes.Array!, headerBytes.Offset, headerBytes.Count);
+                    encoder.WriteBytes(securityBytes.Array!, securityBytes.Offset, securityBytes.Count);
                     encoder.WriteBytes(encrypted);
 
                     if (SecurityDebugLogger.IsDebugEnabled && SecurityHeader is AsymmetricAlgorithmHeader asymForLog)
+                    {
+                        // Diagnostic output is deliberately off the normal hot path. Materialize
+                        // copies only when debug logging explicitly asks for them.
                         OpnDiagnostics.LogToBinary(asymForLog, MessageHeader, Cryptography,
-                            headerBytes, securityBytes, bodyBytes.Length, padding, signature,
+                            headerBytes.AsSpan().ToArray(), securityBytes.AsSpan().ToArray(), bodyLength, padding, signature,
                             encrypted, plainSize, encryptedSize, encoder.Length);
+                    }
                 }
                 else
                 {
-                    MessageHeader.BodySize = securityBytes.Length + bodyBytes.Length;
+                    MessageHeader.BodySize = securityBytes.Count + bodyLength;
                     MessageHeader.Encode(encoder);
-                    encoder.WriteBytes(securityBytes);
-                    encoder.WriteBytes(bodyBytes);
+                    encoder.WriteBytes(securityBytes.Array!, securityBytes.Offset, securityBytes.Count);
+                    encoder.WriteBytes(bodyEncoder.GetBuffer().Array!, 0, bodyLength);
                 }
 
-                return encoder.ToByteArray();
+                var written = encoder.GetBuffer();
+                var result = BufferLease.Rent(written.Count, BufferSensitivity.Sensitive);
+                Buffer.BlockCopy(written.Array!, written.Offset, result.Array, 0, written.Count);
+                result.Length = written.Count;
+                return result;
             }
             finally
             {
                 ReturnEncoder(encoder);
+                ReturnEncoder(headerEncoder);
                 ReturnEncoder(securityEncoder);
                 ReturnEncoder(bodyEncoder);
             }

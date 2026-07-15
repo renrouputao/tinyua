@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Threading.Channels;
 using TinyUa.Core.Logging;
 using TinyUa.Core.Binary;
 using TinyUa.Core.Types;
@@ -34,7 +35,7 @@ namespace TinyUa.Client.Subscriptions
 
     internal static class SubscriptionManager
     {
-        internal static async Task<Subscription> CreateSubscriptionAsync(SubscriptionRouter router, double publishingInterval = 1000.0, bool autoStart = true, int maxPublishRequests = 2, ILogger? logger = null)
+        internal static async Task<Subscription> CreateSubscriptionAsync(SubscriptionRouter router, double publishingInterval = 1000.0, bool autoStart = true, int maxPublishRequests = 2, ILogger? logger = null, SubscriptionDispatchOptions? dispatchOptions = null)
         {
             var result = await router.CreateSubscriptionAsync(publishingInterval).ConfigureAwait(false);
             var subscription = new Subscription(
@@ -44,7 +45,8 @@ namespace TinyUa.Client.Subscriptions
                 result.RevisedLifetimeCount,
                 result.RevisedMaxKeepAliveCount,
                 maxPublishRequests,
-                logger);
+                logger,
+                dispatchOptions);
 
             if (autoStart)
                 subscription.StartPublishing();
@@ -81,11 +83,19 @@ namespace TinyUa.Client.Subscriptions
         private readonly ILogger? _logger;
         private readonly object _lock = new();
         private readonly int _maxPublishRequests;
+        private readonly SubscriptionDispatchOptions _dispatchOptions;
+        private readonly Channel<DispatchItem> _dispatchQueue;
+        private readonly CancellationTokenSource _dispatchCancellation = new();
+        private readonly SemaphoreSlim _enqueueLock = new(1, 1);
+        private readonly Task _dispatchWorker;
         private int _isDisposed;
+        private int _dispatchStopped;
         internal volatile bool _running;
         private volatile uint _lastSequenceNumber;
         private int _publishCount;
         private int _notificationCount;
+        private int _pendingNotificationMessages;
+        private long _droppedNotificationMessages;
 
         internal uint SubscriptionId { get; }
         internal double PublishingInterval { get; }
@@ -104,12 +114,18 @@ namespace TinyUa.Client.Subscriptions
         internal int NotificationCount => _notificationCount;
         internal uint LastSequenceNumber => _lastSequenceNumber;
 
+        /// <summary>Number of Publish responses currently queued for callback dispatch.</summary>
+        public int PendingNotificationMessages => Math.Max(0, Volatile.Read(ref _pendingNotificationMessages));
+
+        /// <summary>Number of Publish responses intentionally dropped by the configured overflow policy.</summary>
+        public long DroppedNotificationMessages => Interlocked.Read(ref _droppedNotificationMessages);
+
         internal bool IsPublishing => _running;
         internal bool IsSubscriptionDisposed => Volatile.Read(ref _isDisposed) != 0;
 
         internal Subscription(SubscriptionRouter router, uint subscriptionId,
             double publishingInterval, uint lifetimeCount, uint maxKeepAliveCount,
-            int maxPublishRequests = 2, ILogger? logger = null)
+            int maxPublishRequests = 2, ILogger? logger = null, SubscriptionDispatchOptions? dispatchOptions = null)
         {
             _router = router;
             _logger = logger;
@@ -118,10 +134,181 @@ namespace TinyUa.Client.Subscriptions
             LifetimeCount = lifetimeCount;
             MaxKeepAliveCount = maxKeepAliveCount;
             _maxPublishRequests = Math.Max(1, maxPublishRequests);
+            _dispatchOptions = (dispatchOptions ?? new SubscriptionDispatchOptions()).Clone();
+            var capacity = Math.Max(1, _dispatchOptions.QueueCapacity);
+            _dispatchQueue = Channel.CreateBounded<DispatchItem>(new BoundedChannelOptions(capacity)
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                FullMode = BoundedChannelFullMode.Wait,
+                AllowSynchronousContinuations = false
+            });
+            _dispatchWorker = ProcessPublishResponsesAsync();
             _running = false;
             _lastSequenceNumber = 0;
 
             _router?.Register(subscriptionId, this);
+        }
+
+        /// <summary>
+        /// Queues a decoded Publish response for this subscription's single callback worker.
+        /// The enqueue lock preserves the router's response order when several Publish requests
+        /// complete concurrently. With <see cref="NotificationOverflowPolicy.Wait"/>, this method
+        /// waits for capacity; the Publish engine awaits it before replenishing its finite window.
+        /// </summary>
+        internal async Task EnqueuePublishResponseAsync(PublishResponse response)
+        {
+            await EnqueueDispatchAsync(new DispatchItem(response)).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Routes a Republish result through the normal serial dispatch worker and completes only
+        /// after its sequence number and callback processing have finished. Reconnect therefore
+        /// keeps the same acknowledgement and backpressure semantics as live publishing.
+        /// </summary>
+        internal async Task EnqueueRepublishAsync(NotificationMessage message)
+        {
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            await EnqueueDispatchAsync(new DispatchItem(message, completion)).ConfigureAwait(false);
+            try
+            {
+                await completion.Task.WaitAsync(_dispatchCancellation.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (_dispatchCancellation.IsCancellationRequested)
+            {
+            }
+        }
+
+        private async Task EnqueueDispatchAsync(DispatchItem item)
+        {
+            if (IsSubscriptionDisposed || Volatile.Read(ref _dispatchStopped) != 0)
+            {
+                item.Cancel();
+                return;
+            }
+
+            try
+            {
+                await _enqueueLock.WaitAsync(_dispatchCancellation.Token).ConfigureAwait(false);
+                try
+                {
+                    if (IsSubscriptionDisposed || Volatile.Read(ref _dispatchStopped) != 0)
+                    {
+                        item.Cancel();
+                        return;
+                    }
+
+                    if (_dispatchQueue.Writer.TryWrite(item))
+                    {
+                        Interlocked.Increment(ref _pendingNotificationMessages);
+                        return;
+                    }
+
+                    switch (_dispatchOptions.OverflowPolicy)
+                    {
+                        case NotificationOverflowPolicy.Wait:
+                            await _dispatchQueue.Writer.WriteAsync(item, _dispatchCancellation.Token).ConfigureAwait(false);
+                            Interlocked.Increment(ref _pendingNotificationMessages);
+                            return;
+
+                        case NotificationOverflowPolicy.DropOldest:
+                            if (_dispatchQueue.Reader.TryRead(out var dropped))
+                            {
+                                Interlocked.Decrement(ref _pendingNotificationMessages);
+                                RecordDroppedItem(dropped);
+                            }
+                            if (_dispatchQueue.Writer.TryWrite(item))
+                            {
+                                Interlocked.Increment(ref _pendingNotificationMessages);
+                                return;
+                            }
+                            RecordDroppedItem(item);
+                            return;
+
+                        case NotificationOverflowPolicy.DropNewest:
+                            RecordDroppedItem(item);
+                            return;
+
+                        default:
+                            throw new InvalidOperationException($"Unknown notification overflow policy: {_dispatchOptions.OverflowPolicy}");
+                    }
+                }
+                finally
+                {
+                    _enqueueLock.Release();
+                }
+            }
+            catch (OperationCanceledException) when (_dispatchCancellation.IsCancellationRequested)
+            {
+                item.Cancel();
+            }
+            catch (ChannelClosedException) when (Volatile.Read(ref _dispatchStopped) != 0)
+            {
+                item.Cancel();
+            }
+        }
+
+        private async Task ProcessPublishResponsesAsync()
+        {
+            try
+            {
+                await foreach (var item in _dispatchQueue.Reader.ReadAllAsync(_dispatchCancellation.Token).ConfigureAwait(false))
+                {
+                    Interlocked.Decrement(ref _pendingNotificationMessages);
+                    try
+                    {
+                        if (!IsSubscriptionDisposed)
+                        {
+                            if (item.PublishResponse != null)
+                                HandlePublishResponse(item.PublishResponse);
+                            else if (item.RepublishedMessage != null)
+                                HandleRepublishedNotification(item.RepublishedMessage);
+                        }
+                    }
+                    finally
+                    {
+                        item.Complete();
+                    }
+                }
+            }
+            catch (OperationCanceledException) when (_dispatchCancellation.IsCancellationRequested)
+            {
+            }
+            finally
+            {
+                while (_dispatchQueue.Reader.TryRead(out var item))
+                    item.Cancel();
+            }
+        }
+
+        private void RecordDroppedItem(DispatchItem item)
+        {
+            Interlocked.Increment(ref _droppedNotificationMessages);
+            AdvanceLastSequenceNumber(item.SequenceNumber);
+            _logger?.LogWarning($"Subscription {SubscriptionId}: notification dispatch queue is full; dropped PublishResponse seq={_lastSequenceNumber} ({_dispatchOptions.OverflowPolicy})");
+            item.Cancel();
+        }
+
+        private void AdvanceLastSequenceNumber(uint sequenceNumber)
+        {
+            lock (_lock)
+            {
+                var current = _lastSequenceNumber;
+                // OPC UA sequence numbers are unsigned and may wrap. A delta below half the
+                // uint range is newer; this also prevents an older queued response from moving
+                // the acknowledgement backwards after a newer response was dropped.
+                if (current == 0 || unchecked(sequenceNumber - current) < 0x80000000u)
+                    _lastSequenceNumber = sequenceNumber;
+            }
+        }
+
+        private void StopDispatching()
+        {
+            if (Interlocked.Exchange(ref _dispatchStopped, 1) != 0)
+                return;
+
+            _dispatchQueue.Writer.TryComplete();
+            _dispatchCancellation.Cancel();
         }
 
         internal async Task<MonitoredItem> AddMonitoredItemAsync(NodeId nodeId, DataChangeHandler? handler = null, uint queueSize = 0)
@@ -226,7 +413,7 @@ namespace TinyUa.Client.Subscriptions
                 response.ResponseHeader.ServiceResult.Check();
 
                 var notificationMsg = response.Parameters.NotificationMessage;
-                _lastSequenceNumber = notificationMsg.SequenceNumber;
+                AdvanceLastSequenceNumber(notificationMsg.SequenceNumber);
 
                 if (notificationMsg.NotificationData.Count > 0)
                 {
@@ -241,6 +428,23 @@ namespace TinyUa.Client.Subscriptions
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, $"Subscription {SubscriptionId}: error processing PublishResponse");
+                OnPublishError?.Invoke(ex);
+            }
+        }
+
+        private void HandleRepublishedNotification(NotificationMessage message)
+        {
+            try
+            {
+                AdvanceLastSequenceNumber(message.SequenceNumber);
+                if (message.NotificationData.Count > 0)
+                    ProcessNotification(message);
+                else
+                    OnKeepAlive?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, $"Subscription {SubscriptionId}: error processing republished notification");
                 OnPublishError?.Invoke(ex);
             }
         }
@@ -341,7 +545,32 @@ namespace TinyUa.Client.Subscriptions
 
             StopPublishing();
 
+            StopDispatching();
+
             _router?.Unregister(SubscriptionId);
+        }
+
+        private sealed class DispatchItem
+        {
+            internal PublishResponse? PublishResponse { get; }
+            internal NotificationMessage? RepublishedMessage { get; }
+            private readonly TaskCompletionSource<bool>? _completion;
+
+            internal uint SequenceNumber => PublishResponse?.Parameters.NotificationMessage.SequenceNumber
+                ?? RepublishedMessage?.SequenceNumber
+                ?? 0;
+
+            internal DispatchItem(PublishResponse response) => PublishResponse = response;
+
+            internal DispatchItem(NotificationMessage message, TaskCompletionSource<bool> completion)
+            {
+                RepublishedMessage = message;
+                _completion = completion;
+            }
+
+            internal void Complete() => _completion?.TrySetResult(true);
+
+            internal void Cancel() => _completion?.TrySetCanceled();
         }
     }
 }

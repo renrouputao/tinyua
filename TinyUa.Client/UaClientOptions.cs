@@ -1,5 +1,6 @@
 using TinyUa.Core;
 using TinyUa.Core.Security;
+using TinyUa.Client.Subscriptions;
 
 namespace TinyUa.Client
 {
@@ -87,6 +88,12 @@ namespace TinyUa.Client
         /// </summary>
         public int MaxPublishRequests { get; set; } = 2;
 
+        /// <summary>
+        /// Notification callback dispatch configuration. Each subscription receives responses
+        /// through its own bounded, ordered queue before user callbacks are invoked.
+        /// </summary>
+        public SubscriptionDispatchOptions SubscriptionDispatch { get; set; } = new();
+
         /// <summary>Security configuration (policy, mode, identity, certificates).</summary>
         public SecurityOptions Security { get; set; } = new();
 
@@ -113,6 +120,7 @@ namespace TinyUa.Client
             ReconnectInitialDelayMs = ReconnectInitialDelayMs,
             ReconnectMaxDelayMs = ReconnectMaxDelayMs,
             MaxPublishRequests = MaxPublishRequests,
+            SubscriptionDispatch = SubscriptionDispatch.Clone(),
             Security = Security.Clone()
         };
     }

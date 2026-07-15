@@ -106,7 +106,7 @@ namespace TinyUa.Client.Subscriptions
         /// dropped Publish response cannot pin an in-flight slot forever.
         /// </summary>
         internal Task SendPublishAsync(SubscriptionAcknowledgement[] acknowledgements,
-            Action<byte[]> onResponse, Action<Exception> onError, TimeSpan? responseTimeout = null)
+            Func<byte[], Task> onResponse, Action<Exception> onError, TimeSpan? responseTimeout = null)
         {
             var request = new PublishRequest
             {

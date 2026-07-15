@@ -47,13 +47,12 @@ namespace TinyUa.Client
             return next.HasValue;
         }
 
-        /// <summary>Unconditionally transitions to <paramref name="state"/> and raises StateChanged.</summary>
-        internal void Set(ClientState state)
-        {
-            lock (_lock)
-                _state = state;
-            StateChanged?.Invoke(state);
-        }
+        /// <summary>
+        /// Transitions to <paramref name="state"/> only when it differs from the current state.
+        /// <see cref="Replay"/> is the explicit opt-in for callers that intentionally need a
+        /// repeated notification without a state change.
+        /// </summary>
+        internal bool Set(ClientState state) => Transition(current => current == state ? null : state);
 
         /// <summary>
         /// Raises StateChanged for <paramref name="state"/> without changing the current state —

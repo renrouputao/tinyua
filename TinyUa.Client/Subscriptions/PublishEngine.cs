@@ -139,7 +139,7 @@ namespace TinyUa.Client.Subscriptions
             try
             {
                 await _router.SendPublishAsync(BuildAcknowledgements(),
-                    body => OnPublishResponse(body, epoch),
+                    body => OnPublishResponseAsync(body, epoch),
                     ex => OnPublishFaulted(ex, epoch),
                     PublishResponseTimeout)
                     .ConfigureAwait(false);
@@ -162,10 +162,8 @@ namespace TinyUa.Client.Subscriptions
             _logger.LogDebug(ex, "PublishEngine: publish request faulted");
         }
 
-        private void OnPublishResponse(byte[] body, int epoch)
+        private async Task OnPublishResponseAsync(byte[] body, int epoch)
         {
-            if (epoch == Volatile.Read(ref _epoch))
-                Interlocked.Decrement(ref _inFlight);
             try
             {
                 var decoder = new BinaryDecoder(body);
@@ -174,7 +172,7 @@ namespace TinyUa.Client.Subscriptions
                 var subscriptionId = response.Parameters.SubscriptionId;
                 if (_router.TryGet(subscriptionId, out var target) && target != null && !target.IsSubscriptionDisposed)
                 {
-                    target.HandlePublishResponse(response);
+                    await target.EnqueuePublishResponseAsync(response).ConfigureAwait(false);
                 }
                 else
                 {
@@ -192,6 +190,12 @@ namespace TinyUa.Client.Subscriptions
             }
             finally
             {
+                // Keep this Publish slot occupied until the response is either accepted by the
+                // subscription queue or deliberately dropped. In Wait mode this is the point
+                // where a full queue becomes real backpressure: the finite Publish window cannot
+                // refill, including from the fallback timer.
+                if (epoch == Volatile.Read(ref _epoch))
+                    Interlocked.Decrement(ref _inFlight);
                 if (_running && epoch == Volatile.Read(ref _epoch))
                     TopUp();
             }

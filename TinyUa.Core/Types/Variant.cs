@@ -209,6 +209,9 @@ namespace TinyUa.Core.Types
                 return VariantType.Guid;
             if (type == typeof(byte[]))
                 return VariantType.ByteString;
+            // ExpandedNodeId derives from NodeId, so this check must precede NodeId.
+            if (type == typeof(ExpandedNodeId))
+                return VariantType.ExpandedNodeId;
             if (type == typeof(NodeId) || type.IsSubclassOf(typeof(NodeId)))
                 return VariantType.NodeId;
             if (type == typeof(StatusCode))

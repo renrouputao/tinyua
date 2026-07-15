@@ -1,6 +1,5 @@
 using TinyUa.Core;
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net.Sockets;
@@ -109,6 +108,80 @@ namespace TinyUa.Client.Connection
             finally { if (got) _sendLock.Release(); }
         }
 
+        private void FaultAllCallbacks(Exception exception)
+        {
+            // An ERR frame is terminal for every outstanding request. Removing entries before
+            // completing them prevents stale callbacks from accumulating until a later close.
+            foreach (var pair in _callbacks)
+            {
+                if (_callbacks.TryRemove(pair.Key, out var callback))
+                    callback.TrySetException(exception);
+            }
+        }
+
+        /// <summary>
+        /// Writes a request while the caller owns <see cref="_sendLock"/>. Unsecured MSG frames
+        /// are sent as [24-byte header, encoded body] with socket gather I/O, so the body is not
+        /// copied into a transient full-frame array. The loop deliberately handles partial sends;
+        /// TCP does not guarantee that a vectored send consumes every segment.
+        /// </summary>
+        private async Task<int> WriteMessageAsync(
+            ArraySegment<byte> body, byte[] messageType, uint requestId, CancellationToken cancellationToken = default)
+        {
+            if (_dead)
+                throw new SocketException((int)SocketError.ConnectionReset);
+
+            using var header = BufferLease.Rent(24);
+            if (_connection.TryWriteUnsecuredMessageHeader(body, messageType, requestId, header.CapacitySpan))
+            {
+                header.Length = 24;
+                await SendSegmentsAsync(header.Segment, body, cancellationToken).ConfigureAwait(false);
+                return 24 + body.Count;
+            }
+
+            var chunks = _connection.CreateMessageChunks(body, messageType, requestId);
+            var total = 0;
+            foreach (var chunk in chunks)
+            {
+                using var message = chunk.ToBufferLease();
+                await _stream!.WriteAsync(message.Array, 0, message.Length, cancellationToken).ConfigureAwait(false);
+                total += message.Length;
+            }
+            return total;
+        }
+
+        private async Task SendSegmentsAsync(
+            ArraySegment<byte> first, ArraySegment<byte> second, CancellationToken cancellationToken)
+        {
+            var socket = _socket ?? throw new InvalidOperationException("Socket is not connected");
+            var segments = new List<ArraySegment<byte>>(2) { first, second };
+
+            while (segments.Count > 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int sent = await socket.SendAsync((IList<ArraySegment<byte>>)segments, SocketFlags.None)
+                    .ConfigureAwait(false);
+                if (sent <= 0)
+                    throw new SocketException((int)SocketError.ConnectionReset);
+
+                while (sent > 0 && segments.Count > 0)
+                {
+                    var current = segments[0];
+                    if (sent >= current.Count)
+                    {
+                        sent -= current.Count;
+                        segments.RemoveAt(0);
+                    }
+                    else
+                    {
+                        segments[0] = new ArraySegment<byte>(
+                            current.Array!, current.Offset + sent, current.Count - sent);
+                        sent = 0;
+                    }
+                }
+            }
+        }
+
         private void CloseTransport()
         {
             _dead = true;
@@ -171,24 +244,28 @@ namespace TinyUa.Client.Connection
                 MaxChunkCount = maxChunkCount
             };
 
-            var encoder = new BinaryEncoder();
-            var header = new Header(MessageType.Hello, ChunkType.Single);
-            hello.Encode(encoder);
-            header.BodySize = encoder.Length;
+            var encoder = RentEncoder();
+            try
+            {
+                hello.Encode(encoder);
+                var body = encoder.GetBuffer();
+                using var header = BufferLease.Rent(8);
+                var bytes = header.Array;
+                bytes[0] = MessageType.Hello[0];
+                bytes[1] = MessageType.Hello[1];
+                bytes[2] = MessageType.Hello[2];
+                bytes[3] = ChunkType.Single;
+                BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4, 4), (uint)(8 + body.Count));
+                header.Length = 8;
 
-            var headerEncoder = new BinaryEncoder();
-            header.Encode(headerEncoder);
-
-            _logger.LogDebug($"Sending Hello: {headerEncoder.Length + encoder.Length} bytes");
-
-            var combinedBuffer = new byte[headerEncoder.Length + encoder.Length];
-            Buffer.BlockCopy(headerEncoder.ToByteArray(), 0, combinedBuffer, 0, headerEncoder.Length);
-            Buffer.BlockCopy(encoder.ToByteArray(), 0, combinedBuffer, headerEncoder.Length, encoder.Length);
-
-            if (_stream == null)
-                throw new InvalidOperationException("Socket is not connected");
-
-            await _stream!.WriteAsync(combinedBuffer, 0, combinedBuffer.Length).WithTimeout(_timeout, "Hello write operation timed out");
+                _logger.LogDebug($"Sending Hello: {header.Length + body.Count} bytes");
+                await SendSegmentsAsync(header.Segment, body, CancellationToken.None)
+                    .WithTimeout(_timeout, "Hello write operation timed out");
+            }
+            finally
+            {
+                ReturnEncoder(encoder);
+            }
 
             var responseHeaderTask = ReadHeaderDirectAsync();
             var responseHeader = await responseHeaderTask.WithTimeout(_timeout, "Hello response header read timed out");
@@ -310,7 +387,6 @@ namespace TinyUa.Client.Connection
             // and stay consistent with SendEncodedBodyAsync below.
             var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            byte[] message;
             await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
@@ -328,17 +404,15 @@ namespace TinyUa.Client.Connection
                 if (debugEnabled)
                     _logger.LogDebug($"Connection state: ChannelId={_connection.SecurityToken.ChannelId}, TokenId={_connection.SecurityToken.TokenId}");
 
-                message = _connection.MessageToBinary(bodySegment, messageType, (uint)requestId);
+                // Install the correlation before writing: a local server can answer before the
+                // asynchronous send operation resumes.
+                _callbacks[requestId] = tcs;
+                var messageLength = await WriteMessageAsync(bodySegment, messageType, (uint)requestId, cancellationToken)
+                    .ConfigureAwait(false);
 
                 if (debugEnabled)
-                    _logger.LogDebug($"Sending request {requestId}: {message.Length} bytes");
+                    _logger.LogDebug($"Sending request {requestId}: {messageLength} bytes");
 
-                if (_dead)
-                    throw new SocketException((int)SocketError.ConnectionReset);
-
-                _callbacks[requestId] = tcs;
-
-                await _stream!.WriteAsync(message, 0, message.Length, cancellationToken).ConfigureAwait(false);
                 MarkRequestSent();
             }
             catch
@@ -371,7 +445,7 @@ namespace TinyUa.Client.Connection
         /// <paramref name="callback"/> (response received) or <paramref name="onError"/>
         /// (request faulted/cancelled, e.g. on disconnect) eventually fires.
         /// </summary>
-        internal async Task SendRequestNoWait<T>(T request, Action<byte[]>? callback = null, byte[]? messageType = null, Action<Exception>? onError = null, TimeSpan? responseTimeout = null) where T : IEncodable
+        internal async Task SendRequestNoWait<T>(T request, Func<byte[], Task>? callback = null, byte[]? messageType = null, Action<Exception>? onError = null, TimeSpan? responseTimeout = null) where T : IEncodable
         {
             messageType ??= MessageType.SecureMessage;
 
@@ -403,13 +477,9 @@ namespace TinyUa.Client.Connection
                     }
                 }
 
-                var message = _connection.MessageToBinary(bodySegment, messageType, (uint)requestId);
-
-                if (_dead)
-                    throw new SocketException((int)SocketError.ConnectionReset);
                 _callbacks[requestId] = tcs;
 
-                await _stream!.WriteAsync(message, 0, message.Length).ConfigureAwait(false);
+                await WriteMessageAsync(bodySegment, messageType, (uint)requestId).ConfigureAwait(false);
                 MarkRequestSent();
             }
             catch (Exception)
@@ -431,7 +501,7 @@ namespace TinyUa.Client.Connection
             }
         }
 
-        private async Task InvokeCallbackAsync(Task<byte[]> task, Action<byte[]>? callback, Action<Exception>? onError, TimeSpan? responseTimeout, uint requestId)
+        private async Task InvokeCallbackAsync(Task<byte[]> task, Func<byte[], Task>? callback, Action<Exception>? onError, TimeSpan? responseTimeout, uint requestId)
         {
             byte[] result;
             try
@@ -480,7 +550,8 @@ namespace TinyUa.Client.Connection
 
             try
             {
-                callback?.Invoke(result);
+                if (callback != null)
+                    await callback(result).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -504,7 +575,6 @@ namespace TinyUa.Client.Connection
             var requestId = Interlocked.Increment(ref _requestId);
             var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            byte[] message;
             if (!await _sendLock.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false))
                 throw new TimeoutException("Timed out waiting for send lock");
             try
@@ -514,12 +584,10 @@ namespace TinyUa.Client.Connection
                     if (_connection.NextSecurityToken.TokenId != 0)
                         _connection.RevolveTokens();
                 }
-                if (_dead)
-                    throw new SocketException((int)SocketError.ConnectionReset);
                 _callbacks[requestId] = tcs;
 
-                message = _connection.MessageToBinary(encodedBody, messageType, (uint)requestId);
-                await _stream!.WriteAsync(message, 0, message.Length).ConfigureAwait(false);
+                await WriteMessageAsync(new ArraySegment<byte>(encodedBody), messageType, (uint)requestId)
+                    .ConfigureAwait(false);
                 MarkRequestSent();
             }
             catch
@@ -557,7 +625,9 @@ namespace TinyUa.Client.Connection
             // channel id (4B) and one per body — at least three syscalls per message — with
             // a single buffered read, while keeping the zero-external-dependency story intact
             // (System.IO.Pipelines is not part of the net8.0 NETCore.App shared framework).
-            byte[] buf = ArrayPool<byte>.Shared.Rent(8192);
+            const int normalReceiveBufferSize = 8192;
+            const int maxRetainedReceiveBufferSize = 256 * 1024;
+            byte[] buf = BufferLease.RentSharedArray(normalReceiveBufferSize);
             int len = 0;   // count of valid bytes in buf
             int pos = 0;   // parse cursor; bytes [0, pos) are already consumed
 
@@ -576,6 +646,15 @@ namespace TinyUa.Client.Connection
                             Array.Copy(buf, pos, buf, 0, len - pos);
                         len -= pos;
                         pos = 0;
+                    }
+
+                    // A single large but valid frame may grow the connection ring into the LOH.
+                    // Once it has been fully consumed, return to the normal steady-state size so
+                    // one historical response cannot inflate this connection indefinitely.
+                    if (len == 0 && buf.Length > maxRetainedReceiveBufferSize)
+                    {
+                        BufferLease.ReturnSharedArray(buf);
+                        buf = BufferLease.RentSharedArray(normalReceiveBufferSize);
                     }
 
                     // Pull more data from the socket whenever there is room.
@@ -619,28 +698,28 @@ namespace TinyUa.Client.Connection
 
                     // Drain every complete message currently buffered. TryParseMessage returns
                     // false (leaving pos untouched) when only a partial message remains.
-                    while (TryParseMessage(buf, pos, len, out int msgLen, out var header, out byte[] body))
+                    while (TryParseMessage(buf, pos, len, out int msgLen, out var header, out ArraySegment<byte> body))
                     {
                         if (debugEnabled)
                         {
                             _logger.LogDebug($"Received header: {header}");
-                            _logger.LogDebug($"Received body: {body.Length} bytes");
+                            _logger.LogDebug($"Received body: {body.Count} bytes");
                         }
 
                         object? message;
                         try
                         {
-                            message = _connection.ReceiveFromHeaderAndBody(header, body);
+                            message = _connection.ReceiveFromHeaderAndBody(header!, body);
                         }
                         catch (Exception ex)
                         {
                             _logger.LogWarning(ex, $"Receive loop: message parsing failed (header={header}), attempting to fault callback and continue");
 
-                            if (header.IsSecureMessage && body.Length >= 12)
+                            if (header!.IsSecureMessage && body.Count >= 12)
                             {
                                 try
                                 {
-                                    var reqId = BinaryPrimitives.ReadUInt32LittleEndian(body.AsSpan(8));
+                                    var reqId = BinaryPrimitives.ReadUInt32LittleEndian(body.Array!.AsSpan(body.Offset + 8, 4));
                                     if (_callbacks.TryRemove(reqId, out var tcs))
                                     {
                                         tcs.TrySetException(ex);
@@ -652,8 +731,7 @@ namespace TinyUa.Client.Connection
                             }
                             else
                             {
-                                foreach (var callback in _callbacks.Values)
-                                    callback.TrySetException(ex);
+                                FaultAllCallbacks(ex);
                             }
 
                             // The frame was parsed off the wire; advance past it so we do not
@@ -683,11 +761,8 @@ namespace TinyUa.Client.Connection
                         {
                             _logger.LogWarning($"Error message received: StatusCode=0x{err.Error.Value:X8}, Reason={err.Reason}");
 
-                            foreach (var callback in _callbacks.Values)
-                            {
-                                callback.TrySetException(new UaException(err.Error.Value,
-                                    $"Server ErrorMessage: Code=0x{err.Error.Value:X8}, Reason={err.Reason ?? "(null)"}"));
-                            }
+                            FaultAllCallbacks(new UaException(err.Error.Value,
+                                $"Server ErrorMessage: Code=0x{err.Error.Value:X8}, Reason={err.Reason ?? "(null)"}"));
                         }
 
                         pos += msgLen;
@@ -697,9 +772,9 @@ namespace TinyUa.Client.Connection
                     // grow it so the next read can accommodate the rest of the partial message.
                     if (pos == 0 && len == buf.Length)
                     {
-                        var grown = ArrayPool<byte>.Shared.Rent(buf.Length * 2);
+                        var grown = BufferLease.RentSharedArray(buf.Length * 2);
                         Buffer.BlockCopy(buf, 0, grown, 0, len);
-                        ArrayPool<byte>.Shared.Return(buf);
+                        BufferLease.ReturnSharedArray(buf);
                         buf = grown;
                     }
                 }
@@ -711,7 +786,7 @@ namespace TinyUa.Client.Connection
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(buf);
+                BufferLease.ReturnSharedArray(buf);
 
                 var unexpectedExit = _running;
 
@@ -740,17 +815,17 @@ namespace TinyUa.Client.Connection
         /// Attempts to parse one complete message from the front of the receive buffer
         /// <paramref name="buf"/> starting at offset <paramref name="pos"/> (with <paramref name="len"/>
         /// valid bytes total). On success, returns the decoded <see cref="Header"/>, a freshly
-        /// allocated body byte array and the total number of bytes consumed in
+        /// borrowed body segment and the total number of bytes consumed in
         /// <paramref name="msgLen"/>. Returns false (without modifying the caller's cursor) when
         /// the buffer does not yet hold a full message, so the caller can request more data from
         /// the socket.
         /// </summary>
         private bool TryParseMessage(byte[] buf, int pos, int len,
-            out int msgLen, out Header? header, out byte[] body)
+            out int msgLen, out Header? header, out ArraySegment<byte> body)
         {
             msgLen = 0;
             header = null;
-            body = Array.Empty<byte>();
+            body = default;
 
             int available = len - pos;
             if (available < 8)
@@ -769,7 +844,7 @@ namespace TinyUa.Client.Connection
             if (available < packetSize)
                 return false;
 
-            var msgType = new byte[3] { buf[pos], buf[pos + 1], buf[pos + 2] };
+            var msgType = ResolveMessageType(buf[pos], buf[pos + 1], buf[pos + 2]);
             byte chunkType = buf[pos + 3];
             bool isSecure = MessageType.Equals(msgType, MessageType.SecureMessage)
                          || MessageType.Equals(msgType, MessageType.SecureOpen)
@@ -800,14 +875,24 @@ namespace TinyUa.Client.Connection
                 ChannelId = channelId
             };
 
-            if (bodySize > 0)
-            {
-                body = new byte[bodySize];
-                Buffer.BlockCopy(buf, pos + (int)offset, body, 0, bodySize);
-            }
+            body = new ArraySegment<byte>(buf, pos + (int)offset, bodySize);
 
             msgLen = (int)packetSize;
             return true;
+        }
+
+        private static byte[] ResolveMessageType(byte first, byte second, byte third)
+        {
+            // All normal OPC UA TCP message types are shared immutable three-byte constants.
+            // Reusing them removes one allocation from every received frame.
+            if (first == (byte)'M' && second == (byte)'S' && third == (byte)'G') return MessageType.SecureMessage;
+            if (first == (byte)'O' && second == (byte)'P' && third == (byte)'N') return MessageType.SecureOpen;
+            if (first == (byte)'C' && second == (byte)'L' && third == (byte)'O') return MessageType.SecureClose;
+            if (first == (byte)'H' && second == (byte)'E' && third == (byte)'L') return MessageType.Hello;
+            if (first == (byte)'A' && second == (byte)'C' && third == (byte)'K') return MessageType.Acknowledge;
+            if (first == (byte)'E' && second == (byte)'R' && third == (byte)'R') return MessageType.Error;
+            if (first == (byte)'I' && second == (byte)'N' && third == (byte)'V') return MessageType.Invalid;
+            return new[] { first, second, third };
         }
 
         public void Dispose()

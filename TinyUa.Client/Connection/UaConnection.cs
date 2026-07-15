@@ -401,7 +401,7 @@ namespace TinyUa.Client.Connection
             return TResponse.Decode(decoder);
         }
 
-        internal Task SendRequestNoWaitAsync<T>(T request, Action<byte[]>? callback = null, Action<Exception>? onError = null, TimeSpan? responseTimeout = null) where T : IEncodable
+        internal Task SendRequestNoWaitAsync<T>(T request, Func<byte[], Task>? callback = null, Action<Exception>? onError = null, TimeSpan? responseTimeout = null) where T : IEncodable
             => _socket!.SendRequestNoWait(request, callback, null, onError, responseTimeout);
 
         internal byte[] PrepareEncodedReadRequest(NodeId[] nodeIds, AttributeId attributeId = AttributeId.Value)

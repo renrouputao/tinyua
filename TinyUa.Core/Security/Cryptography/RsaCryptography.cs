@@ -95,6 +95,8 @@ namespace TinyUa.Core.Security.Cryptography
             return result;
         }
 
+        public bool TryEncryptInPlace(byte[] data) => false;
+
         public byte[] Decrypt(ReadOnlySpan<byte> data)
         {
             if (data.Length == _localKeySize)
@@ -116,6 +118,20 @@ namespace TinyUa.Core.Security.Cryptography
 
         public byte[] Sign(byte[] data)
             => _localPrivateKey.SignData(data, _signatureHash, _signaturePadding);
+
+        public byte[] Sign(ReadOnlySpan<byte> header, ReadOnlySpan<byte> securityHeader, ReadOnlySpan<byte> body)
+        {
+            using var hash = IncrementalHash.CreateHash(_signatureHash);
+            hash.AppendData(header);
+            hash.AppendData(securityHeader);
+            hash.AppendData(body);
+            Span<byte> digest = stackalloc byte[64];
+            var digestLength = hash.GetHashAndReset(digest);
+            var signature = new byte[SignatureSize];
+            if (!_localPrivateKey.TrySignHash(digest[..digestLength], signature, _signatureHash, _signaturePadding, out var written))
+                throw new CryptographicException("RSA signature destination was unexpectedly too small.");
+            return written == signature.Length ? signature : signature[..written];
+        }
 
         public bool VerifyData(byte[] data, ReadOnlySpan<byte> signature)
             => _remotePublicKey.VerifyData(data, signature, _signatureHash, _signaturePadding);

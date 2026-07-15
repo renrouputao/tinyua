@@ -27,12 +27,17 @@ namespace TinyUa.Transport
 
     internal class SecureConnection
     {
+        // The negotiated chunk size limits one packet, but an unbounded stream of intermediate
+        // chunks could still retain arbitrary memory before a final chunk arrives.
+        private const int MaxIncomingChunkCount = 1024;
+        private const int MaxIncomingMessageSize = 64 * 1024 * 1024;
         private uint _sequenceNumber;
         private uint? _peerSequenceNumber;
         private readonly List<MessageChunk> _incomingParts;
         private bool _isOpen;
         private bool _allowPrevToken;
         private int _maxChunkSize;
+        private int _incomingMessageSize;
         private readonly object _tokenLock = new();
 
         internal SecurityPolicy SecurityPolicy { get; private set; }
@@ -51,6 +56,7 @@ namespace TinyUa.Transport
             _isOpen = false;
             _allowPrevToken = false;
             _maxChunkSize = 65536;
+            _incomingMessageSize = 0;
 
             SecurityToken = new ChannelSecurityToken();
             NextSecurityToken = new ChannelSecurityToken();
@@ -183,6 +189,33 @@ namespace TinyUa.Transport
 
         private byte[] MessageToBinaryCore(ArraySegment<byte> message, byte[] messageType, uint requestId)
         {
+            var chunks = CreateMessageChunks(message, messageType, requestId);
+
+            if (chunks.Count == 1)
+                return chunks[0].ToBinary();
+
+            var buffers = new byte[chunks.Count][];
+            var total = 0;
+            for (int i = 0; i < chunks.Count; i++)
+            {
+                buffers[i] = chunks[i].ToBinary();
+                total += buffers[i].Length;
+            }
+
+            var result = new byte[total];
+            var offset = 0;
+            foreach (var buffer in buffers)
+            {
+                Buffer.BlockCopy(buffer, 0, result, offset, buffer.Length);
+                offset += buffer.Length;
+            }
+
+            return result;
+        }
+
+        /// <summary>Builds independently sendable chunks and assigns their sequence numbers.</summary>
+        internal List<MessageChunk> CreateMessageChunks(ArraySegment<byte> message, byte[] messageType, uint requestId)
+        {
             uint channelId = SecurityToken.ChannelId;
             uint tokenId = SecurityToken.TokenId;
 
@@ -208,27 +241,7 @@ namespace TinyUa.Transport
             {
                 chunk.SequenceHeader.SequenceNumber = NextSequenceNumber();
             }
-
-            if (chunks.Count == 1)
-                return chunks[0].ToBinary();
-
-            var buffers = new byte[chunks.Count][];
-            var total = 0;
-            for (int i = 0; i < chunks.Count; i++)
-            {
-                buffers[i] = chunks[i].ToBinary();
-                total += buffers[i].Length;
-            }
-
-            var result = new byte[total];
-            var offset = 0;
-            foreach (var buffer in buffers)
-            {
-                Buffer.BlockCopy(buffer, 0, result, offset, buffer.Length);
-                offset += buffer.Length;
-            }
-
-            return result;
+            return chunks;
         }
 
         private uint NextSequenceNumber()
@@ -285,12 +298,52 @@ namespace TinyUa.Transport
             return MessageToBinaryCore(body, messageType, requestId);
         }
 
-        internal object ReceiveFromHeaderAndBody(Header header, byte[] body)
+        /// <summary>
+        /// Writes the fixed 24-byte MSG frame prefix for an unsecured single chunk. The caller
+        /// can gather-write this prefix with the already encoded body, avoiding a full body copy.
+        /// </summary>
+        internal bool TryWriteUnsecuredMessageHeader(
+            ArraySegment<byte> body, byte[] messageType, uint requestId, Span<byte> destination)
         {
+            if (destination.Length < 24
+                || MessageType.Equals(messageType, MessageType.SecureOpen)
+                || SecurityPolicy.SymmetricCryptography.SignatureSize != 0
+                || SecurityPolicy.SymmetricCryptography.PlainBlockSize > 1
+                || body.Count > MessageChunk.MaxBodySize(SecurityPolicy.SymmetricCryptography, _maxChunkSize))
+            {
+                return false;
+            }
+
+            var sequenceNumber = NextSequenceNumber();
+            destination[0] = messageType[0];
+            destination[1] = messageType[1];
+            destination[2] = messageType[2];
+            destination[3] = ChunkType.Single;
+            BinaryPrimitives.WriteUInt32LittleEndian(destination.Slice(4, 4), (uint)(24 + body.Count));
+            BinaryPrimitives.WriteUInt32LittleEndian(destination.Slice(8, 4), SecurityToken.ChannelId);
+            BinaryPrimitives.WriteUInt32LittleEndian(destination.Slice(12, 4), SecurityToken.TokenId);
+            BinaryPrimitives.WriteUInt32LittleEndian(destination.Slice(16, 4), sequenceNumber);
+            BinaryPrimitives.WriteUInt32LittleEndian(destination.Slice(20, 4), requestId);
+            return true;
+        }
+
+        internal object ReceiveFromHeaderAndBody(Header header, byte[] body)
+            => ReceiveFromHeaderAndBody(header, new ArraySegment<byte>(body));
+
+        /// <summary>
+        /// Decodes a frame whose body still resides in the receive ring buffer. The frame is only
+        /// borrowed for this synchronous call; message payloads that outlive it are copied by the
+        /// decoder, which avoids the former full-frame body allocation on every receive.
+        /// </summary>
+        internal object ReceiveFromHeaderAndBody(Header header, ArraySegment<byte> body)
+        {
+
+            if (body.Array == null)
+                throw new ArgumentException("Frame body must have an array backing.", nameof(body));
 
             if (header.IsSecureMessage || header.IsSecureClose)
             {
-                var decoder = new BinaryDecoder(body);
+                var decoder = new BinaryDecoder(body.Array, body.Offset, body.Count);
                 var securityHeader = SymmetricAlgorithmHeader.Decode(decoder);
                 CheckSymmetricHeader(securityHeader);
 
@@ -305,27 +358,28 @@ namespace TinyUa.Transport
 
             if (header.IsSecureOpen)
             {
-                var chunk = MessageChunk.FromHeaderAndBody(SecurityPolicy, header, new BinaryDecoder(body));
+                var chunk = MessageChunk.FromHeaderAndBody(SecurityPolicy, header,
+                    new BinaryDecoder(body.Array, body.Offset, body.Count));
                 return Receive(chunk);
             }
 
             if (header.IsHello)
             {
-                var hello = Hello.Decode(new BinaryDecoder(body));
+                var hello = Hello.Decode(new BinaryDecoder(body.Array, body.Offset, body.Count));
                 _maxChunkSize = (int)hello.ReceiveBufferSize;
                 return hello;
             }
 
             if (header.IsAcknowledge)
             {
-                var ack = Acknowledge.Decode(new BinaryDecoder(body));
+                var ack = Acknowledge.Decode(new BinaryDecoder(body.Array, body.Offset, body.Count));
                 _maxChunkSize = (int)ack.SendBufferSize;
                 return ack;
             }
 
             if (header.IsError)
             {
-                var error = ErrorMessage.Decode(new BinaryDecoder(body));
+                var error = ErrorMessage.Decode(new BinaryDecoder(body.Array, body.Offset, body.Count));
                 return error;
             }
 
@@ -377,7 +431,16 @@ namespace TinyUa.Transport
         private object Receive(MessageChunk chunk)
         {
             CheckIncomingChunk(chunk);
+            if (_incomingParts.Count >= MaxIncomingChunkCount
+                || chunk.Body.Length > MaxIncomingMessageSize - _incomingMessageSize)
+            {
+                _incomingParts.Clear();
+                _incomingMessageSize = 0;
+                throw new UaException(0x80000000,
+                    $"Incoming message exceeds limits ({MaxIncomingChunkCount} chunks, {MaxIncomingMessageSize} bytes)");
+            }
             _incomingParts.Add(chunk);
+            _incomingMessageSize += chunk.Body.Length;
 
             if (chunk.MessageHeader.ChunkType == ChunkType.Intermediate)
             {
@@ -388,6 +451,7 @@ namespace TinyUa.Transport
             {
                 var error = ErrorMessage.Decode(new BinaryDecoder(chunk.Body));
                 _incomingParts.Clear();
+                _incomingMessageSize = 0;
                 return null;
             }
 
@@ -395,6 +459,7 @@ namespace TinyUa.Transport
             {
                 var message = new Message(new List<MessageChunk>(_incomingParts));
                 _incomingParts.Clear();
+                _incomingMessageSize = 0;
                 return message;
             }
 

@@ -20,6 +20,7 @@ namespace TinyUa.Core.Logging
         private StreamWriter? _writer;
         private string? _currentDate;
         private bool _disposed;
+        private bool _stopping;
 
         private readonly ConcurrentQueue<string> _queue = new();
         private readonly SemaphoreSlim _signal = new(0);
@@ -67,7 +68,7 @@ namespace TinyUa.Core.Logging
             {
                 lock (_lock)
                 {
-                    if (_disposed) return;
+                    if (_stopping || _disposed) return;
                     EnsureWriter();
                     _writer!.WriteLine(line);
                     _writer.Flush();
@@ -75,14 +76,21 @@ namespace TinyUa.Core.Logging
                 return;
             }
 
-            if (_queue.Count >= MaxQueueSize)
+            // Serialize enqueue with shutdown. Without this gate a producer could release the
+            // semaphore after Dispose had already disposed it, or append a line after the final
+            // drain, both of which made async logging racy and lossy.
+            lock (_lock)
             {
-                Interlocked.Increment(ref _droppedCount);
-                return;
-            }
+                if (_stopping || _disposed) return;
+                if (_queue.Count >= MaxQueueSize)
+                {
+                    Interlocked.Increment(ref _droppedCount);
+                    return;
+                }
 
-            _queue.Enqueue(line);
-            _signal.Release();
+                _queue.Enqueue(line);
+                _signal.Release();
+            }
         }
 
         /// <inheritdoc />
@@ -102,7 +110,6 @@ namespace TinyUa.Core.Logging
                 {
                     lock (_lock)
                     {
-                        if (_disposed) return;
                         EnsureWriter();
                         _writer!.WriteLine(line);
                     }
@@ -118,7 +125,6 @@ namespace TinyUa.Core.Logging
             {
                 lock (_lock)
                 {
-                    if (_disposed) break;
                     EnsureWriter();
                     _writer!.WriteLine(line);
                 }
@@ -173,8 +179,10 @@ namespace TinyUa.Core.Logging
         {
             lock (_lock)
             {
-                if (_disposed) return;
-                _disposed = true;
+                if (_stopping || _disposed) return;
+                // Stop accepting entries before cancellation, but keep the writer usable until
+                // its final drain has completed.
+                _stopping = true;
             }
 
             if (_async)
@@ -192,6 +200,7 @@ namespace TinyUa.Core.Logging
 
             lock (_lock)
             {
+                _disposed = true;
                 _writer?.Dispose();
                 _writer = null;
             }

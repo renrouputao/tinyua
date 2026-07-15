@@ -51,6 +51,15 @@ namespace TinyUa.Client
 
         private TaskCompletionSource<bool>? _stopInProgress;
 
+        private readonly record struct ReconnectRequest(
+            ReconnectEngine? Engine,
+            string? EndpointUrl,
+            bool CanReconnect,
+            bool StateChanged)
+        {
+            internal bool IsReady => CanReconnect && Engine != null && !string.IsNullOrEmpty(EndpointUrl);
+        }
+
         /// <summary>Whether the client is currently connected and the underlying channel is alive.</summary>
         public bool IsConnected => _stateMachine.State == ClientState.Connected && _client.IsAlive;
 
@@ -130,7 +139,7 @@ namespace TinyUa.Client
             _client = new UaConnection((int)_options.Timeout, _logger);
             _subscriptionRouter = new SubscriptionRouter(_client, _logger);
             _orchestrator = new ConnectionOrchestrator(_client, _options, _logger);
-            _stateMachine.StateChanged += state => StateChanged?.Invoke(state);
+            _stateMachine.StateChanged += RaiseStateChanged;
         }
 
         /// <summary>Start connection without cancellation. Performs full handshake: Hello → OpenChannel → CreateSession → ActivateSession.</summary>
@@ -260,7 +269,6 @@ namespace TinyUa.Client
             var sessionId = _client.SessionId;
             var authToken = _client.AuthenticationToken ?? new NodeId();
             _reconnectEngine = new ReconnectEngine(_client, _options, _logger);
-            _reconnectEngine.ReconnectStarted += () => _stateMachine.Set(ClientState.Reconnecting);
             _reconnectEngine.ReconnectCompleted += (lossless) =>
             {
                 _stateMachine.Set(ClientState.Connected);
@@ -275,10 +283,10 @@ namespace TinyUa.Client
                     try { sub.StartPublishing(); } catch { }
                 }
 
-                SubscriptionsRecovered?.Invoke(lossless);
+                RaiseSubscriptionsRecovered(lossless);
             };
             _reconnectEngine.ReconnectFailed += () => _stateMachine.Set(ClientState.Disconnected);
-            _reconnectEngine.ReconnectBackoff += (retry, delay) => ReconnectBackoff?.Invoke(retry, delay);
+            _reconnectEngine.ReconnectBackoff += RaiseReconnectBackoff;
 
             if (sessionId != null)
                 _reconnectEngine.OnSessionEstablished(sessionId, authToken);
@@ -368,9 +376,45 @@ namespace TinyUa.Client
         private void StartKeepAlive()
         {
             StopAndDisposeKeepAlive();
-            _keepAliveManager = new KeepAliveManager(_client, (int)_options.SessionTimeout, (int)_options.ChannelLifetime,
+            var channelLifetime = _client.RevisedChannelLifetime > 0
+                ? _client.RevisedChannelLifetime
+                : _options.ChannelLifetime;
+            _keepAliveManager = new KeepAliveManager(_client, (int)_options.SessionTimeout, (int)channelLifetime,
                 _logger, _options.SessionKeepAliveIntervalMs);
             _keepAliveManager.Start();
+        }
+
+        private void RaiseStateChanged(ClientState state)
+        {
+            var handlers = StateChanged;
+            if (handlers == null) return;
+            foreach (Action<ClientState> handler in handlers.GetInvocationList())
+            {
+                try { handler(state); }
+                catch (Exception ex) { _logger.LogWarning(ex, "StateChanged event handler threw"); }
+            }
+        }
+
+        private void RaiseSubscriptionsRecovered(bool lossless)
+        {
+            var handlers = SubscriptionsRecovered;
+            if (handlers == null) return;
+            foreach (Action<bool> handler in handlers.GetInvocationList())
+            {
+                try { handler(lossless); }
+                catch (Exception ex) { _logger.LogWarning(ex, "SubscriptionsRecovered event handler threw"); }
+            }
+        }
+
+        private void RaiseReconnectBackoff(int retry, int delay)
+        {
+            var handlers = ReconnectBackoff;
+            if (handlers == null) return;
+            foreach (Action<int, int> handler in handlers.GetInvocationList())
+            {
+                try { handler(retry, delay); }
+                catch (Exception ex) { _logger.LogWarning(ex, "ReconnectBackoff event handler threw"); }
+            }
         }
 
         private void OnSocketConnectionLost(Exception? ex)
@@ -384,34 +428,45 @@ namespace TinyUa.Client
         {
             _logger.LogWarning(ex, "Connection lost — triggering reconnect");
 
+            var reconnect = EnterReconnecting();
+            if (!reconnect.StateChanged)
+                return;
+
+            if (reconnect.IsReady)
+                await reconnect.Engine!.ReconnectAsync(reconnect.EndpointUrl!, RebuildSubscriptionAsync);
+        }
+
+        /// <summary>
+        /// The sole entry point for moving a live client into reconnecting. It captures the
+        /// engine under the same state lock as the transition, so concurrent socket failures and
+        /// request failures share one reconnect task and emit at most one StateChanged event.
+        /// </summary>
+        private ReconnectRequest EnterReconnecting()
+        {
             ReconnectEngine? engine = null;
             string? endpointUrl = null;
-
-            bool transitioned = _stateMachine.Transition(state =>
+            var canReconnect = false;
+            var stateChanged = _stateMachine.Transition(state =>
             {
-                if (IsDisposed
-                    || state == ClientState.Disconnecting
-                    || state == ClientState.Disconnected)
+                if (IsDisposed || state == ClientState.Disconnecting || state == ClientState.Disconnected)
                     return null;
 
                 engine = _reconnectEngine;
                 endpointUrl = _endpointUrl;
-                return ClientState.Reconnecting;
+                canReconnect = engine != null && !string.IsNullOrEmpty(endpointUrl);
+                return state == ClientState.Reconnecting ? null : ClientState.Reconnecting;
             });
-            if (!transitioned)
-                return;
 
-            StopAndDisposeKeepAlive();
-
-            foreach (var sub in _subscriptions.Snapshot())
+            if (stateChanged)
             {
-                try { sub.StopPublishing(); } catch { }
+                StopAndDisposeKeepAlive();
+                foreach (var sub in _subscriptions.Snapshot())
+                {
+                    try { sub.StopPublishing(); } catch { }
+                }
             }
 
-            if (engine != null && endpointUrl != null)
-            {
-                await engine.ReconnectAsync(endpointUrl, RebuildSubscriptionAsync);
-            }
+            return new ReconnectRequest(engine, endpointUrl, canReconnect, stateChanged);
         }
 
         private async Task<Subscription?> RebuildSubscriptionAsync(SubscriptionTemplate template)
@@ -430,7 +485,8 @@ namespace TinyUa.Client
                 template.PublishingInterval,
                 autoStart: true,
                 template.MaxPublishRequests,
-                _logger).ConfigureAwait(false);
+                _logger,
+                _options.SubscriptionDispatch).ConfigureAwait(false);
 
             template.SubscriptionId = sub.SubscriptionId;
             template.ActiveSubscription = sub;
@@ -452,29 +508,14 @@ namespace TinyUa.Client
             if (_stateMachine.State == ClientState.Connected && _client.IsAlive)
                 return;
 
-            ReconnectEngine? engine = null;
-            string? endpointUrl = null;
-
-            _stateMachine.Transition(state =>
-            {
-                ThrowIfDisposed();
-                engine = _reconnectEngine;
-                endpointUrl = _endpointUrl;
-                if (state != ClientState.Reconnecting
-                    && state != ClientState.Connecting
-                    && state != ClientState.Disconnecting
-                    && state != ClientState.Disconnected)
-                {
-                    _logger.LogWarning($"EnsureConnectedAsync: connection dead (state={state}, alive={_client.IsAlive}) — triggering reconnect");
-                    return ClientState.Reconnecting;
-                }
-                return null;
-            });
-
-            if (engine == null || string.IsNullOrEmpty(endpointUrl))
+            var reconnect = EnterReconnecting();
+            if (!reconnect.IsReady)
                 throw new UaConnectionException("Client is not connected. Call RunAsync() first.");
 
-            var success = await engine.ReconnectAsync(endpointUrl, RebuildSubscriptionAsync)
+            if (reconnect.StateChanged)
+                _logger.LogWarning($"EnsureConnectedAsync: connection dead (alive={_client.IsAlive}) — triggering reconnect");
+
+            var success = await reconnect.Engine!.ReconnectAsync(reconnect.EndpointUrl!, RebuildSubscriptionAsync)
                 .WithTimeout((int)_options.Timeout, "Timed out waiting for reconnection")
                 .WaitAsync(cancellationToken)
                 .ConfigureAwait(false);
@@ -514,7 +555,7 @@ namespace TinyUa.Client
                 {
 
                     _logger.LogWarning(ex, $"{operationName} timed out waiting for reconnection");
-                    _stateMachine.Set(ClientState.Reconnecting);
+                    EnterReconnecting();
                     if (_options.ErrorMode == ErrorMode.Throw)
                         throw new UaConnectionException($"{operationName} timed out waiting for reconnection");
                     return null;
@@ -522,7 +563,7 @@ namespace TinyUa.Client
                 catch (Exception ex) when (attempt == 0 && IsConnectionError(ex))
                 {
                     _logger.LogWarning(ex, $"{operationName} failed with connection error — reconnecting and retrying");
-                    _stateMachine.Set(ClientState.Reconnecting);
+                    EnterReconnecting();
                     continue;
                 }
                 catch (Exception ex)
@@ -745,7 +786,8 @@ namespace TinyUa.Client
                 publishingInterval,
                 autoStart: true,
                 _options.MaxPublishRequests,
-                _logger).ConfigureAwait(false);
+                _logger,
+                _options.SubscriptionDispatch).ConfigureAwait(false);
 
             var template = new SubscriptionTemplate
             {

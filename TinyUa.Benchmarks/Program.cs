@@ -12,7 +12,22 @@ class Program
     {
         Console.OutputEncoding = System.Text.Encoding.UTF8;
 
-        // Subcommand dispatch: security | latency | kepware | basic [url]
+        try
+        {
+            await RunAsync(args);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Benchmark failed: {ex.GetType().Name}: {ex.Message}");
+            Console.Error.WriteLine(ex.StackTrace);
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static async Task RunAsync(string[] args)
+    {
+
+        // Subcommand dispatch: security | latency | kepware | none | memory | substress | basic [url]
         var cmd = args.Length > 0 ? args[0].ToLowerInvariant() : "basic";
 
         switch (cmd)
@@ -25,6 +40,15 @@ class Program
                 return;
             case "kepware":
                 await KepwareTest.RunAsync(args.Length > 1 ? args[1] : DefaultUrl);
+                return;
+            case "none":
+                await NoneKepwareBenchmark.RunAsync(args.Length > 1 ? args[1] : DefaultUrl);
+                return;
+            case "memory":
+                await MemoryKepwareBenchmark.RunAsync(args.Length > 1 ? args[1] : DefaultUrl);
+                return;
+            case "substress":
+                await SubscriptionStressBenchmark.RunAsync(args.Length > 1 ? args[1] : DefaultUrl);
                 return;
             case "basic":
             default:
@@ -39,6 +63,9 @@ class Program
         => s.Equals("security", StringComparison.OrdinalIgnoreCase)
            || s.Equals("latency", StringComparison.OrdinalIgnoreCase)
            || s.Equals("kepware", StringComparison.OrdinalIgnoreCase)
+           || s.Equals("none", StringComparison.OrdinalIgnoreCase)
+           || s.Equals("memory", StringComparison.OrdinalIgnoreCase)
+           || s.Equals("substress", StringComparison.OrdinalIgnoreCase)
            || s.Equals("basic", StringComparison.OrdinalIgnoreCase);
 
     // ═══════════════════════════════════════════════════════════════════════

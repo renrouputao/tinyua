@@ -34,6 +34,7 @@ namespace TinyUa.Client.Connection
         private int _channelKeepAliveCount;
         private int _sessionKeepAliveCount;
         private int _sessionReadInFlight;
+        private int _channelRenewInFlight;
 
         // Server_ServerStatus_State (i=2259): the cheapest standard node to poll for liveness —
         // a scalar Int32, mandated by the spec on every server.
@@ -76,7 +77,7 @@ namespace TinyUa.Client.Connection
             if (_disposed)
                 throw new ObjectDisposedException(nameof(KeepAliveManager));
 
-            var interval = Math.Max(1000, Math.Min((int)(_channelLifetimeMs * 0.75), 3600000));
+            var interval = ComputeChannelRenewInterval(_channelLifetimeMs);
             _channelRenewTimer = new Timer(OnChannelRenew, null, interval, interval);
 
             // One-shot timer, re-armed after every tick: either to the moment the idle threshold
@@ -87,15 +88,23 @@ namespace TinyUa.Client.Connection
                     _sessionIdleThresholdMs, Timeout.Infinite);
         }
 
+        internal static int ComputeChannelRenewInterval(int channelLifetimeMs)
+        {
+            var lifetime = channelLifetimeMs > 0 ? channelLifetimeMs : 3600000;
+            return Math.Max(1000, Math.Min((int)(lifetime * 0.75), 3600000));
+        }
+
         private void OnChannelRenew(object? state)
         {
             if (_disposed) return;
+            if (Interlocked.CompareExchange(ref _channelRenewInFlight, 1, 0) != 0)
+                return;
 
             Task.Run(async () =>
             {
-                if (_disposed) return;
                 try
                 {
+                    if (_disposed) return;
                     await _client.RenewSecureChannelAsync((uint)_channelLifetimeMs).ConfigureAwait(false);
                     Interlocked.Increment(ref _channelKeepAliveCount);
                     ChannelRenewed?.Invoke();
@@ -104,6 +113,10 @@ namespace TinyUa.Client.Connection
                 {
 
                     _logger.LogWarning(ex, "Channel Renew FAILED — connection may be dead");
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _channelRenewInFlight, 0);
                 }
             }).Forget(_logger, nameof(OnChannelRenew));
         }

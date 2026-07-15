@@ -1,6 +1,7 @@
 using System;
 using System.Threading.Tasks;
 using TinyUa.Core.Logging;
+using TinyUa.Client.Subscriptions;
 
 namespace TinyUa.Client
 {
@@ -55,6 +56,17 @@ namespace TinyUa.Client
 
             /// <summary>Set the error handling strategy. Default <see cref="ErrorMode.Throw"/>.</summary>
             public ClientBuilder WithErrorMode(ErrorMode mode) { _options.ErrorMode = mode; return this; }
+
+            /// <summary>
+            /// Configure the bounded, ordered queue used to dispatch subscription callbacks.
+            /// The default policy waits when full and therefore applies backpressure to the
+            /// finite Publish window instead of growing an unbounded callback backlog.
+            /// </summary>
+            public ClientBuilder WithSubscriptionDispatch(Action<SubscriptionDispatchOptions> configure)
+            {
+                configure(_options.SubscriptionDispatch);
+                return this;
+            }
 
             /// <summary>
             /// Set the security policy by short name (e.g. <c>"Basic256Sha256"</c>, <c>"Aes128_Sha256_RsaOaep"</c>,

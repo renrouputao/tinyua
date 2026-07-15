@@ -51,6 +51,9 @@ namespace TinyUa.Core.Security
         byte[] Padding(int dataSize);
         byte[] Sign(byte[] data);
 
+        /// <summary>Signs three protocol segments without materializing their concatenation.</summary>
+        byte[] Sign(ReadOnlySpan<byte> header, ReadOnlySpan<byte> securityHeader, ReadOnlySpan<byte> body);
+
         /// <summary>
         /// Verifies a signature over arbitrary data using the remote party's public key.
         /// Used for CreateSession ServerSignature verification (OPC UA Part 4 §5.6.2).
@@ -67,6 +70,9 @@ namespace TinyUa.Core.Security
             ReadOnlySpan<byte> body, ReadOnlySpan<byte> signature);
 
         byte[] Encrypt(byte[] data);
+
+        /// <summary>Attempts to encrypt a complete protocol payload in place.</summary>
+        bool TryEncryptInPlace(byte[] data);
         byte[] Decrypt(ReadOnlySpan<byte> data);
 
         /// <summary>
@@ -87,10 +93,12 @@ namespace TinyUa.Core.Security
 
         public byte[] Padding(int dataSize) => Array.Empty<byte>();
         public byte[] Sign(byte[] data) => Array.Empty<byte>();
+        public byte[] Sign(ReadOnlySpan<byte> header, ReadOnlySpan<byte> securityHeader, ReadOnlySpan<byte> body) => Array.Empty<byte>();
         public bool VerifyData(byte[] data, ReadOnlySpan<byte> signature) => true;
         public void Verify(ReadOnlySpan<byte> header, ReadOnlySpan<byte> securityHeader,
             ReadOnlySpan<byte> body, ReadOnlySpan<byte> signature) { }
         public byte[] Encrypt(byte[] data) => data;
+        public bool TryEncryptInPlace(byte[] data) => true;
         public byte[] Decrypt(ReadOnlySpan<byte> data) => data.ToArray();
         public int GetPaddingSize(ReadOnlySpan<byte> data) => 0;
     }

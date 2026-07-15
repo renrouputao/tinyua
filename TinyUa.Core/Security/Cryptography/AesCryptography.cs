@@ -150,6 +150,17 @@ namespace TinyUa.Core.Security.Cryptography
         public byte[] Sign(byte[] data)
             => HMACSHA256.HashData(_localSigKey!, data);
 
+        public byte[] Sign(ReadOnlySpan<byte> header, ReadOnlySpan<byte> securityHeader, ReadOnlySpan<byte> body)
+        {
+            using var hmac = IncrementalHash.CreateHMAC(HashAlgorithmName.SHA256, _localSigKey!);
+            hmac.AppendData(header);
+            hmac.AppendData(securityHeader);
+            hmac.AppendData(body);
+            var signature = new byte[SignatureSize];
+            hmac.GetHashAndReset(signature);
+            return signature;
+        }
+
         public bool VerifyData(byte[] data, ReadOnlySpan<byte> signature)
         {
             using var hmac = IncrementalHash.CreateHMAC(HashAlgorithmName.SHA256, _remoteSigKey!);
@@ -180,6 +191,17 @@ namespace TinyUa.Core.Security.Cryptography
             var cipher = _localCipher
                 ?? throw new CryptographicException("Local symmetric key not initialized.");
             return cipher.Aes.EncryptCbc(data, cipher.Iv, PaddingMode.None);
+        }
+
+        public bool TryEncryptInPlace(byte[] data)
+        {
+            if (!_isEncrypted)
+                return true;
+
+            var cipher = _localCipher
+                ?? throw new CryptographicException("Local symmetric key not initialized.");
+            return cipher.Aes.TryEncryptCbc(data, cipher.Iv, data, out var written, PaddingMode.None)
+                && written == data.Length;
         }
 
         public byte[] Decrypt(ReadOnlySpan<byte> data)

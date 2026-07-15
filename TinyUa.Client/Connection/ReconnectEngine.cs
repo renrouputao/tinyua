@@ -30,7 +30,6 @@ namespace TinyUa.Client.Connection
 
         internal bool IsReconnecting => _reconnecting;
 
-        internal event Action? ReconnectStarted;
         internal event Action<int, int>? ReconnectBackoff;
         internal event Action<bool>? ReconnectCompleted;
         internal event Action? ReconnectFailed;
@@ -110,8 +109,6 @@ namespace TinyUa.Client.Connection
             var reconnectCts = new CancellationTokenSource();
             lock (_lock)
                 _reconnectCts = reconnectCts;
-            ReconnectStarted?.Invoke();
-
             using var loggerScope = SecurityDebugLogger.BeginScope(_logger);
             bool success = false;
             try
@@ -179,7 +176,9 @@ namespace TinyUa.Client.Connection
         private async Task ConnectTransportAsync(string endpointUrl)
         {
             var uri = new Uri(endpointUrl);
-            await _connection.ConnectAsync(uri.Host, uri.Port).ConfigureAwait(false);
+            // Uri.Port is -1 when an opc.tcp URL omits its port. Initial connection
+            // normalizes this to the OPC UA default (4840); reconnect must do the same.
+            await _connection.ConnectAsync(uri.Host, ResolvePort(uri)).ConfigureAwait(false);
             await _connection.SendHelloAsync(endpointUrl, _options.MaxMessageSize).ConfigureAwait(false);
 
             var policy = _connection.SecurityPolicy;
@@ -265,7 +264,10 @@ namespace TinyUa.Client.Connection
                             // lossless recovery would be dropped silently.
                             if (sub != null && !sub.IsSubscriptionDisposed)
                             {
-                                sub.ProcessNotification(msg);
+                                // Preserve the same bounded, serial dispatch path as live
+                                // Publish responses. Processing republished data inline used to
+                                // bypass backpressure and left LastSequenceNumber stale.
+                                await sub.EnqueueRepublishAsync(msg).ConfigureAwait(false);
                             }
 
                             tpl.LastSequenceNumber = seq;
@@ -312,6 +314,12 @@ namespace TinyUa.Client.Connection
             }
 
             return lossless;
+        }
+
+        internal static int ResolvePort(Uri endpointUri)
+        {
+            if (endpointUri == null) throw new ArgumentNullException(nameof(endpointUri));
+            return endpointUri.Port > 0 ? endpointUri.Port : 4840;
         }
 
         internal void CancelReconnect()
