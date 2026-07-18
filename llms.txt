@@ -1,21 +1,40 @@
 # TinyUa
 
-> A lightweight, from-scratch OPC UA client stack for .NET 8. Core libraries have zero dependency on the OPC Foundation SDK.
+> A lightweight OPC UA client stack for .NET 8, implemented from scratch. Core, Transport, and
+> Client have no dependency on the OPC Foundation SDK.
 
-## Intro
+## Overview
 
-TinyUa implements the full OPC UA binary protocol from scratch — binary encoding, security policies (4 policies + 3 token types), transport layer with message chunking, and a high-level client with Fluent API. It targets .NET 8 and uses only `System.Security.Cryptography` for all cryptographic operations. The OPC Foundation SDK (`OPCFoundation.NetStandard.Opc.Ua`) is only used in test and example projects for reference comparisons.
+TinyUa implements OPC UA binary encoding, UA TCP framing/chunking, secure channels, sessions,
+Read/Write/Browse services, subscriptions, and reconnect recovery. Cryptography uses .NET 8
+`System.Security.Cryptography`. The OPC Foundation SDK is used only by `TinyUa.Example` and
+`TinyUa.Security.Tests` to host an in-process reference server.
 
-## Quick Start
+Public client namespaces:
+
+- `TinyUa.Client`
+- `TinyUa.Client.Services`
+- `TinyUa.Client.Subscriptions`
+- `TinyUa.Client.Discovery`
+- `TinyUa.Core.Types`
+- `TinyUa.Core.Security`
+- `TinyUa.Core.Logging`
+
+Do not use the removed `TinyUa.Core.Client*` namespaces.
+
+## Build and Self-Test
 
 ```bash
 dotnet build TinyUa.sln
+dotnet test TinyUa.Client.Tests/TinyUa.Client.Tests.csproj
+dotnet test TinyUa.Security.Tests/TinyUa.Security.Tests.csproj
 dotnet run --project TinyUa.Example -- selftest
 ```
 
-Minimal code:
+## Quick Start
+
 ```csharp
-using TinyUa.Core.Client;
+using TinyUa.Client;
 
 await using var client = await UaClient
     .ConnectTo("opc.tcp://server:4840")
@@ -24,181 +43,268 @@ await using var client = await UaClient
     .WithUserName("user", "pass")
     .BuildAndRunAsync();
 
-// Simple typed read
 var time = await client.ReadValueAsync<DateTime>("i=2258");
 Console.WriteLine($"ServerTime: {time:HH:mm:ss.fff}");
 
-// Simple write
 var result = await client.WriteAsync("ns=2;s=SetPoint", 42.0);
-Console.WriteLine(result.StatusCode.IsGood ? "OK" : result.StatusCode.GetStatusText());
+Console.WriteLine(result?.StatusCode.IsGood == true
+    ? "OK"
+    : result?.StatusCode.GetStatusText() ?? "no result");
 ```
 
-## API
+## Connection and Configuration
 
-### Connection & Configuration
+Fluent builder methods:
 
-**Fluent Builder** (`UaClient.ConnectTo(url)`):
-- `.WithSecurity("Basic256Sha256")` — set security policy (None / Basic256Sha256 / Aes128Sha256RsaOaep / Aes256Sha256RsaPss)
-- `.WithUserName(user, pass)` — username/password authentication (password is RSA-OAEP encrypted)
-- `.WithAppName("MyApp")` — set application name
-- `.WithRequestTimeout(5000)` — per-step network timeout in ms (default 30000)
-- `.WithSessionTimeout(ms)` — session lifetime (default 3600000)
-- `.WithReconnectRetries(max)` — max reconnect attempts (default -1 = infinite)
-- `.WithoutReconnect()` — disable auto-reconnect
-- `.WithErrorMode(ErrorMode.ReturnNull)` — return null on error instead of throwing
-- `.EnableLog((level, ex, msg) => ...)` — console logging via delegate
-- `.EnableLogFile("./logs", LogLevel.Debug, async: true)` — file logging
-- `.WithLogger(ILogger)` — custom logger
-- `.Build()` — create client without connecting
-- `.BuildAndRunAsync()` — create + connect + full handshake
+- `.WithSecurity("Basic256Sha256")` — `None`, `Basic256Sha256`,
+  `Aes128Sha256RsaOaep`, or `Aes256Sha256RsaPss`
+- `.WithSecurity(options => ...)` — configure mode, identity, and certificates
+- `.WithUserName(user, pass)` — username/password authentication
+- `.WithAppName("MyApp")`
+- `.WithRequestTimeout(5000)` — per-step network timeout; default 30000 ms
+- `.WithSessionTimeout(ms)`
+- `.WithReconnectRetries(max)` — default -1 means unlimited
+- `.WithoutReconnect()` — equivalent to zero reconnect attempts
+- `.WithErrorMode(ErrorMode.ReturnNull)`
+- `.WithSubscriptionDispatch(options => ...)`
+- `.EnableLog(...)`, `.EnableLogFile(...)`, `.WithLogger(...)`
+- `.Build()` — create without connecting
+- `.BuildAndRunAsync()` — create and connect
 
-**Configuration** (`UaClientOptions`):
-- `Timeount` — per-step network timeout in ms (default 30000)
-- `SessionTimeout` / `ChannelLifetime` — session/channel lifetime in ms
-- `ReconnectMaxRetries` — default -1 (infinite), 0 disables reconnect
-- `ReconnectInitialDelayMs` / `ReconnectMaxDelayMs` — exponential backoff params
-- `ErrorMode` — Throw (default) or ReturnNull
-- `Security.Policy` / `Security.Mode` — security policy and message mode
-- `Security.AutoDiscoverServerCertificate` / `AutoAcceptServerCertificate` — auto-discovery and auto-trust
-- `Security.UserIdentity.Type` — Anonymous, UserName, Certificate
-- `Security.Certificate.AutoGenerate` / `KeySize` / `ValidityYears` — client cert options
+Important `UaClientOptions` properties:
 
-### Read
+- `Timeout`
+- `SessionTimeout`, `SessionKeepAliveIntervalMs`, `ChannelLifetime`
+- `WarmupOnConnect`, `MaxMessageSize`
+- `ReconnectMaxRetries`, `ReconnectInitialDelayMs`, `ReconnectMaxDelayMs`
+- `MaxPublishRequests`
+- `SubscriptionDispatch.QueueCapacity`, `SubscriptionDispatch.OverflowPolicy`
+- `ErrorMode`
+- `Security.Policy`, `Security.Mode`
+- `Security.AutoDiscoverServerCertificate`, `Security.AutoAcceptServerCertificate`
+- `Security.UserIdentity`
+- `Security.Certificate`
+
+`UaClient` deep-clones options during construction. Later mutations to the caller's options do not
+affect the running client.
+
+## Read
 
 ```csharp
-// Single node — returns ReadResult { NodeId, StatusCode, DataValue? }
-var r = await client.ReadAsync("i=2258");
-if (r.StatusCode.IsGood)
-    Console.WriteLine($"{r.NodeId}: {r.DataValue?.Value?.Value}");
+using TinyUa.Core.Types;
 
-// Batch — returns ReadResult[]
-var results = await client.ReadAsync(new NodeId[] { "i=2256", "i=2258" });
-foreach (var r in results)
+var single = await client.ReadAsync("i=2258");
+if (single is { StatusCode.IsGood: true })
+    Console.WriteLine($"{single.NodeId}: {single.DataValue?.Value?.Value}");
+
+var results = await client.ReadAsync(new NodeId[] { "i=2256", "i=2258" })
+    ?? throw new InvalidOperationException("Read returned no results.");
+foreach (var result in results)
 {
-    if (r.StatusCode.IsGood)
-        Console.WriteLine($"{r.NodeId}: {r.DataValue?.Value?.Value}");
-    else
-        Console.WriteLine($"{r.NodeId}: {r.StatusCode.GetStatusText()}");
+    Console.WriteLine(result.StatusCode.IsGood
+        ? $"{result.NodeId}: {result.DataValue?.Value?.Value}"
+        : $"{result.NodeId}: {result.StatusCode.GetStatusText()}");
 }
 
-// Typed single-node helper — returns T?
 var time = await client.ReadValueAsync<DateTime>("i=2258");
-var temp = await client.ReadValueAsync<double>("ns=2;s=Temperature");
 ```
 
-`ReadResult` properties: `NodeId`, `StatusCode` (non-nullable), `DataValue?`
+- Single Read returns `ReadResult?`; batch Read returns `ReadResult[]?`.
+- `ReadResult` contains non-nullable `NodeId` and `StatusCode`, plus nullable `DataValue`.
+- Check `result.StatusCode`, not `result.DataValue?.StatusCode`.
+- `ReadValueAsync<T>` performs an exact CLR cast and returns `default(T)` on null/type mismatch; it
+  does not call `Convert.ChangeType`.
 
-`ReadValueAsync<T>` returns `T?` directly — casts via `Convert.ChangeType`. Returns `default(T)` on failure or type mismatch.
-
-### Write
+## Write
 
 ```csharp
-// Single node — returns WriteResult { NodeId, StatusCode }
-var r = await client.WriteAsync("ns=2;s=SetPoint", 42.0);
-Console.WriteLine(r.StatusCode.IsGood ? "OK" : r.StatusCode.GetStatusText());
+using TinyUa.Client.Services;
+using TinyUa.Core.Types;
 
-// Batch — returns WriteResult[]
+var single = await client.WriteAsync("ns=2;s=SetPoint", 42.0);
+Console.WriteLine(single?.StatusCode.GetStatusText() ?? "no result");
+
 var results = await client.WriteAsync(new WriteValue[]
 {
     new() { NodeId = "ns=2;s=Scalar.Double", Value = new DataValue(3.14) },
     new() { NodeId = "ns=2;s=Scalar.Float",  Value = new DataValue(2.718f) },
-    new() { NodeId = "ns=2;s=Scalar.Int32",  Value = new DataValue(42) },
-});
-foreach (var r in results)
-    Console.WriteLine($"{r.NodeId}: {(r.StatusCode.IsGood ? "OK" : r.StatusCode.GetStatusText())}");
+    new() { NodeId = "ns=2;s=Scalar.Int32",  Value = new DataValue(42) }
+}) ?? throw new InvalidOperationException("Write returned no results.");
 
-// Write without checking result
-await client.WriteValueAsync<double>("ns=2;s=SetPoint", 42.0);
+foreach (var result in results)
+    Console.WriteLine($"{result.NodeId}: {result.StatusCode.GetStatusText()}");
 ```
 
-`WriteResult` properties: `NodeId`, `StatusCode` (non-nullable)
+- Single Write returns `WriteResult?`; batch Write returns `WriteResult[]?`.
+- `WriteResult` contains non-nullable `NodeId` and `StatusCode`.
+- `DataValue(object)` and `new Variant(value)` infer the OPC UA type internally.
+- An explicit `VariantType` converts scalar values through the constructor's internal conversion
+  path, for example `double` to `VariantType.Float`.
 
-`DataValue` constructor: `new DataValue(object)` auto-detects type, or `new DataValue(new Variant(value, VariantType.Float))` for explicit type conversion.
-
-### Browse
+## Browse
 
 ```csharp
-var results = await client.BrowseAsync("i=85");  // Objects folder
-foreach (var desc in results[0].References)
-    Console.WriteLine($"{desc.DisplayName?.Text} ({desc.NodeClass}): {desc.NodeId}");
+var results = await client.BrowseAsync("i=85")
+    ?? throw new InvalidOperationException("Browse returned no results.");
+foreach (var reference in results[0].References ?? [])
+    Console.WriteLine($"{reference.DisplayName?.Text} ({reference.NodeClass}): {reference.NodeId}");
 
-// BrowseNext — continue when ContinuationPoint is present
-if (results[0].ContinuationPoint != null)
+var continuationPoint = results[0].ContinuationPoint;
+if (continuationPoint is { Length: > 0 })
 {
-    var next = await client.BrowseNextAsync(results[0].ContinuationPoint);
-    foreach (var desc in next[0].References)
-        Console.WriteLine($"{desc.DisplayName?.Text}: {desc.NodeId}");
+    var next = await client.BrowseNextAsync(continuationPoint)
+        ?? throw new InvalidOperationException("BrowseNext returned no results.");
+    foreach (var reference in next[0].References ?? [])
+        Console.WriteLine($"{reference.DisplayName?.Text}: {reference.NodeId}");
 }
 ```
 
-### Subscribe
+## Subscriptions and Backpressure
 
 ```csharp
-// Typed single-node subscription
-var sub = await client.SubscribeAsync<DateTime>("i=2258", val =>
-{
-    Console.WriteLine($"ServerTime: {val:HH:mm:ss.fff}");
-}, interval: 500);
+using TinyUa.Client;
+using TinyUa.Client.Subscriptions;
 
-// Batch subscription — NodeId in callback
-var sub = await client.SubscribeAsync(
-    new NodeId[] { "i=2258", "ns=2;s=Temperature" },
-    (nodeId, value, status) =>
+await using var client = await UaClient
+    .ConnectTo("opc.tcp://server:4840")
+    .WithSubscriptionDispatch(options =>
+    {
+        options.QueueCapacity = 64;
+        options.OverflowPolicy = NotificationOverflowPolicy.Wait;
+    })
+    .BuildAndRunAsync();
+
+var subscription = await client.SubscribeAsync<double>(
+    "ns=2;s=Temperature",
+    (value, status) =>
     {
         if (status.IsGood)
-            Console.WriteLine($"{nodeId}: {value}");
+            Console.WriteLine(value);
     },
     interval: 500);
 
-sub.Dispose();  // unsubscribe
+Console.WriteLine($"pending={subscription.PendingNotificationMessages}");
+Console.WriteLine($"dropped={subscription.DroppedNotificationMessages}");
+subscription.Dispose();
 ```
 
-`DataChangeHandler` delegate: `(NodeId nodeId, object? value, StatusCode status)`
-Subscriptions auto-recover on reconnect. Multiple `SubscribeAsync` calls with the same interval share one subscription.
+- `DataChangeHandler`: `(NodeId nodeId, object? value, StatusCode status)`.
+- `DataChangeHandlerEx` adds nullable source and server timestamps.
+- One session-level `PublishEngine` maintains the finite `MaxPublishRequests` credit window.
+- Each subscription has one bounded, ordered callback queue and one worker.
+- `Wait` is the lossless default and propagates backpressure to the Publish window.
+- `DropOldest` favors recent data; `DropNewest` preserves the queued backlog.
+- Different subscriptions have independent callback workers.
+- Subscriptions are Republished or rebuilt during reconnect.
 
-### StatusCode
+## Reconnect and State Events
 
 ```csharp
-status.IsGood / status.IsBad / status.IsUncertain   // bool properties
-status.GetStatusText()  // "Good", "BadNodeIdUnknown", "BadNotWritable", etc.
-                        // Falls back to "Bad (0xNNNNNNNN)" for unrecognized codes
+using TinyUa.Client;
+
+await using var client = UaClient
+    .ConnectTo("opc.tcp://server:4840")
+    .WithReconnectRetries(-1)
+    .Build();
+
+client.StateChanged += state => Console.WriteLine($"state={state}");
+client.ReconnectBackoff += (attempt, delayMs) =>
+    Console.WriteLine($"attempt={attempt}, delay={delayMs} ms");
+client.SubscriptionsRecovered += lossless =>
+    Console.WriteLine($"subscriptions lossless={lossless}");
+
+await client.RunAsync();
 ```
 
-Predefined status codes (30 total): `StatusCode.Good`, `StatusCode.Bad`, `StatusCode.BadNodeIdUnknown`, `StatusCode.BadAttributeIdInvalid`, `StatusCode.BadUserAccessDenied`, `StatusCode.BadNotWritable`, `StatusCode.BadTypeMismatch`, etc.
+`UaClient` is the single owner of `ClientState`. Socket and request failure signals enter through
+one idempotent reconnect path. `ReconnectEngine` coalesces concurrent callers onto one reconnect
+task. `StateChanged(Reconnecting)` is therefore emitted once per actual transition, not once per
+failure signal.
 
-### Endpoint Discovery
+## StatusCode
 
 ```csharp
+status.IsGood;
+status.IsBad;
+status.IsUncertain;
+status.GetStatusText();
+```
+
+`GetStatusText()` returns names such as `Good`, `BadNodeIdUnknown`, `BadNotWritable`, or a
+hexadecimal fallback for unknown codes.
+
+## Endpoint Discovery
+
+```csharp
+using TinyUa.Client.Discovery;
+
 var endpoints = await EndpointDiscoverer.DiscoverAsync("opc.tcp://server:4840");
-foreach (var ep in endpoints)
-    Console.WriteLine($"{ep.SecurityPolicy} ({ep.SecurityMode}): {ep.EndpointUrl}");
+foreach (var endpoint in endpoints)
+    Console.WriteLine($"{endpoint.SecurityPolicy} / {endpoint.SecurityMode}: {endpoint.EndpointUrl}");
 ```
 
-`DiscoveredEndpoint` properties: `EndpointUrl`, `SecurityPolicy` (short name), `SecurityPolicyUri`, `SecurityMode`, `SecurityLevel`, `UserTokenTypes`, `IsSecure`
+`DiscoveredEndpoint` exposes `EndpointUrl`, `SecurityPolicy`, `SecurityPolicyUri`, `SecurityMode`,
+`SecurityLevel`, `UserTokenTypes`, `IsSecure`, and `DisplayText`.
 
 ## Security
 
-| Policy | Key Exchange | Symmetric Crypto | Asymmetric Crypto |
-|--------|-------------|------------------|-------------------|
+| Policy | RSA Encryption | Symmetric Crypto | Asymmetric Signature |
+|--------|----------------|------------------|------------------------|
 | None | — | — | — |
-| Basic256Sha256 | RSA-OAEP-SHA256 | AES-256-CBC + HMAC-SHA256 | RSA-SHA256 |
-| Aes128Sha256RsaOaep | RSA-OAEP-SHA256 | AES-128-CBC + HMAC-SHA256 | RSA-SHA256 |
-| Aes256Sha256RsaPss | RSA-OAEP-SHA256 (PSS) | AES-256-CBC + HMAC-SHA256 | RSA-PSS-SHA256 |
+| Basic256Sha256 | RSA-OAEP-SHA1 | AES-256-CBC + HMAC-SHA256 | RSA-SHA256 |
+| Aes128Sha256RsaOaep | RSA-OAEP-SHA1 | AES-128-CBC + HMAC-SHA256 | RSA-SHA256 |
+| Aes256Sha256RsaPss | RSA-OAEP-SHA256 | AES-256-CBC + HMAC-SHA256 | RSA-PSS-SHA256 |
 
-Token types: Anonymous, UserName, X509 Certificate
+User tokens: Anonymous, UserName, X509 Certificate.
+
+Secure endpoints normally discover the server certificate through GetEndpoints.
+`AutoAcceptServerCertificate=false` enables built-in date, EKU, and chain-integrity checks.
+Unknown self-signed roots remain allowed and CRL revocation is not checked.
+
+## Buffer and Transport Design
+
+- `BufferLease` is a class owner around `ArrayPool<byte>` to prevent copy/double-return bugs.
+- Sensitive used bytes are zeroed before a pooled buffer is returned.
+- Buffers larger than 1 MiB bypass pooling to avoid retaining one-off huge messages.
+- `BinaryEncoderPool` is bounded and drops oversized encoders.
+- The receiver uses one pooled ring buffer, drains multiple complete frames, and shrinks after
+  oversized traffic.
+- None-security messages can use gather send; secure/chunked messages stream pooled chunks.
+- The `memory` benchmark exposes TinyUa rental/return, active/peak bytes, and encoder reuse. The
+  private cache and hit rate inside `ArrayPool.Shared` are not observable.
+
+## Live Verification
+
+Live commands default to `opc.tcp://localhost:49320` and accept another URL after the subcommand:
+
+```bash
+dotnet run --project TinyUa.Benchmarks -- none
+dotnet run --project TinyUa.Benchmarks -- substress
+dotnet run --project TinyUa.Benchmarks -- memory
+dotnet run --project TinyUa.Benchmarks -- basic
+dotnet run --project TinyUa.Benchmarks -- security
+```
+
+`memory` runs until Ctrl+C and repeatedly batch-reads verified-writable variables below
+`Objects/DemoCH/Data`, then writes the just-read values back while reporting allocation, GC, and
+pool usage.
 
 ## Project Structure
 
 | Project | Description |
 |---------|-------------|
-| TinyUa.Core | Binary encoding, OPC UA types, security policies, logging |
-| TinyUa.Transport | Message chunking (OPN/MSG), secure channel, key derivation |
-| TinyUa.Client | Fluent API, connection management, services, subscriptions |
-| TinyUa.Example | Console self-test app with in-process server |
-| TinyUa.Explorer | WPF GUI browser with security endpoint discovery |
-| TinyUa.Benchmarks | Performance and crypto primitive benchmarks |
-| TinyUa.Client.Tests | xUnit client tests |
-| TinyUa.Security.Tests | xUnit security integration tests |
+| TinyUa.Core | Binary encoding, OPC UA types, security, logging, pools |
+| TinyUa.Transport | Message chunking, secure channel, token rotation |
+| TinyUa.Client | Public client API, services, subscriptions, reconnect |
+| TinyUa.Example | Console self-test with in-process OPCF server |
+| TinyUa.Explorer | WPF browser and security endpoint selector |
+| TinyUa.CertGen | WPF client-certificate generator |
+| TinyUa.Benchmarks | Latency, correctness, subscription, memory/GC, crypto benchmarks |
+| TinyUa.Client.Tests | Client concurrency and robustness tests |
+| TinyUa.Security.Tests | Security integration tests with in-process OPCF server |
 
-## Docs
+## Documentation
+
+- [README](README.md)
+- [Architecture and Refactoring Report](docs/refactoring-report.md)
 - [Contributing Guide](CONTRIBUTING.md)
