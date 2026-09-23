@@ -93,24 +93,13 @@ namespace TinyUa.Client.Services
                 ServiceResult = new StatusCode(decoder.ReadUInt32())
             };
 
-            var diEncoding = decoder.ReadByte();
-            if (diEncoding != 0)
+            header.ServiceDiagnostics = DiagnosticInfo.Decode(decoder);
+            var stringCount = decoder.ReadArrayLength();
+            if (stringCount >= 0)
             {
-
-                if ((diEncoding & 0x01) != 0) decoder.ReadInt32();
-                if ((diEncoding & 0x02) != 0) decoder.ReadInt32();
-                if ((diEncoding & 0x04) != 0) decoder.ReadString();
-                if ((diEncoding & 0x08) != 0) decoder.ReadString();
-                if ((diEncoding & 0x10) != 0) decoder.ReadByte();
-                if ((diEncoding & 0x20) != 0) decoder.ReadInt32();
-                if ((diEncoding & 0x40) != 0) decoder.ReadInt32();
-                if ((diEncoding & 0x80) != 0) { }
-            }
-
-            var stringCount = decoder.ReadInt32();
-            for (int i = 0; i < stringCount; i++)
-            {
-                decoder.ReadString();
+                header.StringTable = new string[stringCount];
+                for (int i = 0; i < stringCount; i++)
+                    header.StringTable[i] = decoder.ReadString() ?? "";
             }
 
             var typeId = NodeIdCodec.Decode(decoder);
@@ -136,10 +125,33 @@ namespace TinyUa.Client.Services
 
     /// <summary>
     /// Represents OPC UA diagnostic information associated with a service result.
-    /// Currently empty placeholder for future use.
     /// </summary>
     public class DiagnosticInfo
     {
+        public int SymbolicId { get; set; } = -1;
+        public int NamespaceUri { get; set; } = -1;
+        public int Locale { get; set; } = -1;
+        public int LocalizedText { get; set; } = -1;
+        public string? AdditionalInfo { get; set; }
+        public StatusCode? InnerStatusCode { get; set; }
+        public DiagnosticInfo? InnerDiagnosticInfo { get; set; }
+
+        internal static DiagnosticInfo? Decode(BinaryDecoder decoder, int depth = 0)
+        {
+            if (depth >= 64) throw new InvalidOperationException("DiagnosticInfo nesting exceeds 64 levels.");
+            var mask = decoder.ReadByte();
+            if (mask == 0) return null;
+            if ((mask & 0x80) != 0) throw new InvalidOperationException("Invalid DiagnosticInfo encoding mask.");
+            var result = new DiagnosticInfo();
+            if ((mask & 0x01) != 0) result.SymbolicId = decoder.ReadInt32();
+            if ((mask & 0x02) != 0) result.NamespaceUri = decoder.ReadInt32();
+            if ((mask & 0x04) != 0) result.Locale = decoder.ReadInt32();
+            if ((mask & 0x08) != 0) result.LocalizedText = decoder.ReadInt32();
+            if ((mask & 0x10) != 0) result.AdditionalInfo = decoder.ReadString();
+            if ((mask & 0x20) != 0) result.InnerStatusCode = new StatusCode(decoder.ReadUInt32());
+            if ((mask & 0x40) != 0) result.InnerDiagnosticInfo = Decode(decoder, depth + 1);
+            return result;
+        }
     }
 
     /// <summary>

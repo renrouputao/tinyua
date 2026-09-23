@@ -45,6 +45,7 @@ namespace TinyUa.Client.Connection
 
             var security = _options.Security;
             var isSecure = SecurityPolicyFactory.IsSecurePolicy(security.Policy);
+            _logger.LogDebug("Connect stage: client certificate");
 
             X509Certificate2? localCert = null;
             if (isSecure)
@@ -72,6 +73,7 @@ namespace TinyUa.Client.Connection
 
             if (isSecure && security.AutoDiscoverServerCertificate)
             {
+                _logger.LogDebug("Connect stage: endpoint discovery");
                 _logger.LogDebug("Discovering server endpoints via GetEndpoints (None policy)...");
                 var endpoints = await DiscoverEndpointsAsync(host, port, endpointUrl, cancellationToken).ConfigureAwait(false);
                 SecurityDebugLogger.LogStage("Connect.GetEndpoints",
@@ -108,10 +110,8 @@ namespace TinyUa.Client.Connection
                     }
                 }
 
-                // Resolve the server's PolicyId for the configured user token type (UserName or
-                // Certificate). Anonymous needs no policy id. Matching by TokenType ensures a
-                // Certificate identity gets the certificate policy id, not the username one.
-                if (security.UserIdentity.Type != UserTokenType.Anonymous && selected.UserIdentityTokens != null)
+                // All identity types, including Anonymous, use the server's advertised PolicyId.
+                if (selected.UserIdentityTokens != null)
                 {
                     var tokenPolicy = selected.UserIdentityTokens
                         .FirstOrDefault(t => t.TokenType == security.UserIdentity.Type);
@@ -127,13 +127,16 @@ namespace TinyUa.Client.Connection
             // Use discovered endpoint URL if available, otherwise user-provided
             var effectiveUrl = selected?.EndpointUrl ?? endpointUrl;
 
+            _logger.LogDebug("Connect stage: TCP");
             await _connection.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
+            _logger.LogDebug("Connect stage: Hello");
             await _connection.SendHelloAsync(effectiveUrl, _options.MaxMessageSize, cancellationToken).ConfigureAwait(false);
 
             var clientNonce = new byte[policy.NonceLength];
             if (clientNonce.Length > 0)
                 RandomNumberGenerator.Fill(clientNonce);
 
+            _logger.LogDebug("Connect stage: OpenSecureChannel");
             await _connection.OpenSecureChannelAsync(new OpenSecureChannelParameters
             {
                 RequestType = SecurityTokenRequestType.Issue,
@@ -142,6 +145,7 @@ namespace TinyUa.Client.Connection
                 RequestedLifetime = _options.ChannelLifetime
             }, cancellationToken).ConfigureAwait(false);
 
+            _logger.LogDebug("Connect stage: CreateSession");
             var createResponse = await _connection.CreateSessionAsync(effectiveUrl, _options.ApplicationName,
                 _options.ApplicationUri, _options.ProductUri, (uint)_options.SessionTimeout, cancellationToken).ConfigureAwait(false);
 
@@ -152,7 +156,11 @@ namespace TinyUa.Client.Connection
                 ("serverSignatureAlg", createResponse.ServerSignature?.Algorithm),
                 ("endpointsCount", createResponse.ServerEndpoints?.Length ?? 0));
 
-            var identity = UserIdentityFactory.Build(security.UserIdentity, createResponse, policy, userTokenPolicyId);
+            _logger.LogDebug("Connect stage: user identity policy");
+            var identity = UserIdentityFactory.Build(security.UserIdentity, createResponse, policy, userTokenPolicyId, effectiveUrl);
+            _connection.UserTokenPolicyId = identity.PolicyId;
+            _logger.LogDebug($"Activating session: identity={identity.TokenType}, policyId={identity.PolicyId}, tokenSecurityPolicy={identity.SecurityPolicyUri}");
+            _logger.LogDebug("Connect stage: ActivateSession");
             await _connection.ActivateSessionAsync(identity, cancellationToken).ConfigureAwait(false);
         }
 

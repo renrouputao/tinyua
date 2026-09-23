@@ -315,6 +315,8 @@ namespace TinyUa.Client.Connection
             {
                 var decoder = new BinaryDecoder(responseBody);
                 var ack = Acknowledge.Decode(decoder);
+                _connection.ApplyAcknowledge(ack, hello.SendBufferSize);
+                _logger.LogDebug($"Hello acknowledged: receiveBuffer={ack.ReceiveBufferSize}, sendBuffer={ack.SendBufferSize}, maxMessage={ack.MaxMessageSize}, maxChunks={ack.MaxChunkCount}");
                 StartReceiveLoop();
                 return ack;
             }

@@ -202,7 +202,13 @@ namespace TinyUa.Client.Connection
             {
                 try
                 {
-                    await _connection.ActivateSessionAsync(_lastSessionId, _lastAuthToken, null ).ConfigureAwait(false);
+                    UserIdentityToken? identity = null;
+                    if (_options.Security.UserIdentity.Type == UserTokenType.Anonymous)
+                    {
+                        identity = UserIdentityToken.Anonymous();
+                        identity.PolicyId = _connection.UserTokenPolicyId;
+                    }
+                    await _connection.ActivateSessionAsync(_lastSessionId, _lastAuthToken, identity).ConfigureAwait(false);
                     sessionRecovered = true;
                     _logger.LogInformation("Reconnect: Session reactivated successfully");
                 }
@@ -219,7 +225,8 @@ namespace TinyUa.Client.Connection
                     _options.ApplicationUri, _options.ProductUri, (uint)_options.SessionTimeout).ConfigureAwait(false);
                 var identity = UserIdentityFactory.Build(
                     _options.Security.UserIdentity, createResponse, _connection.SecurityPolicy,
-                    _connection.UserTokenPolicyId);
+                    _connection.UserTokenPolicyId, endpointUrl);
+                _connection.UserTokenPolicyId = identity.PolicyId;
                 await _connection.ActivateSessionAsync(identity).ConfigureAwait(false);
                 _logger.LogInformation("Reconnect: New session created");
             }

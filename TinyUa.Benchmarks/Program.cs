@@ -32,6 +32,9 @@ class Program
 
         switch (cmd)
         {
+            case "diagnose":
+                await ConnectionDiagnostics.RunAsync(args.Skip(1).ToArray());
+                return;
             case "faults":
                 await ConnectionFaultBenchmark.RunAsync(args.Length > 1 ? args[1] : DefaultUrl);
                 return;
@@ -63,7 +66,8 @@ class Program
     }
 
     static bool IsKnownSubcommand(string s)
-        => s.Equals("faults", StringComparison.OrdinalIgnoreCase)
+        => s.Equals("diagnose", StringComparison.OrdinalIgnoreCase)
+           || s.Equals("faults", StringComparison.OrdinalIgnoreCase)
            || s.Equals("security", StringComparison.OrdinalIgnoreCase)
            || s.Equals("latency", StringComparison.OrdinalIgnoreCase)
            || s.Equals("kepware", StringComparison.OrdinalIgnoreCase)

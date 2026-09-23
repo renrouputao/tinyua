@@ -373,7 +373,7 @@ namespace TinyUa.Transport
             if (header.IsAcknowledge)
             {
                 var ack = Acknowledge.Decode(new BinaryDecoder(body.Array, body.Offset, body.Count));
-                _maxChunkSize = (int)ack.SendBufferSize;
+                ApplyAcknowledge(ack);
                 return ack;
             }
 
@@ -384,6 +384,15 @@ namespace TinyUa.Transport
             }
 
             throw new UaException(0x80000000, $"Unsupported message type: {MessageType.ToString(header.MessageType)}");
+        }
+
+        internal void ApplyAcknowledge(Acknowledge acknowledge, uint localSendBufferSize = 65536)
+        {
+            // ReceiveBufferSize is the peer's incoming chunk limit; SendBufferSize describes
+            // its outgoing direction. These sizes need not be equal on embedded servers.
+            if (acknowledge.ReceiveBufferSize < 8192 || localSendBufferSize < 8192)
+                throw new UaException(0x80810000, "Negotiated UA TCP buffer size is smaller than 8192 bytes.");
+            _maxChunkSize = checked((int)Math.Min(localSendBufferSize, acknowledge.ReceiveBufferSize));
         }
 
         private void CheckSymmetricHeader(SymmetricAlgorithmHeader header)

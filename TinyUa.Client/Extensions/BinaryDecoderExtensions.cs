@@ -66,7 +66,14 @@ namespace TinyUa.Client
             if (typeIdValue == ServiceFaultTypeId)
             {
                 var header = ResponseHeader.Decode(decoder);
-                throw new UaException(header.ServiceResult.Value, $"ServiceFault: 0x{header.ServiceResult.Value:X8}");
+                var diagnostics = header.ServiceDiagnostics;
+                var detail = diagnostics?.AdditionalInfo;
+                if (string.IsNullOrEmpty(detail) && diagnostics != null && header.StringTable != null &&
+                    diagnostics.LocalizedText >= 0 && diagnostics.LocalizedText < header.StringTable.Length)
+                    detail = header.StringTable[diagnostics.LocalizedText];
+                throw new UaException(header.ServiceResult.Value,
+                    $"ServiceFault: {header.ServiceResult.GetStatusText()} (0x{header.ServiceResult.Value:X8})" +
+                    (string.IsNullOrEmpty(detail) ? "" : $": {detail}"));
             }
         }
 
@@ -79,17 +86,10 @@ namespace TinyUa.Client
             if (decoder.Remaining < 4)
                 return;
 
-            var count = decoder.ReadInt32();
+            var count = decoder.ReadArrayLength();
             for (int i = 0; i < count; i++)
             {
-                var encoding = decoder.ReadByte();
-                if ((encoding & 0x01) != 0) decoder.ReadInt32();
-                if ((encoding & 0x02) != 0) decoder.ReadInt32();
-                if ((encoding & 0x04) != 0) decoder.ReadString();
-                if ((encoding & 0x08) != 0) decoder.ReadString();
-                if ((encoding & 0x10) != 0) decoder.ReadByte();
-                if ((encoding & 0x20) != 0) decoder.ReadInt32();
-                if ((encoding & 0x40) != 0) decoder.ReadInt32();
+                DiagnosticInfo.Decode(decoder);
             }
         }
     }
