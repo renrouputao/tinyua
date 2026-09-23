@@ -42,19 +42,19 @@ namespace TinyUa.Client.Discovery
             EndpointDescription[]? endpoints;
             using (var conn = new UaConnection(timeoutMs, NullLogger.Instance))
             {
-                await conn.ConnectAsync(host, port).ConfigureAwait(false);
+                await conn.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    await conn.SendHelloAsync(endpointUrl, 0).ConfigureAwait(false);
+                    await conn.SendHelloAsync(endpointUrl, 0, cancellationToken).ConfigureAwait(false);
                     await conn.OpenSecureChannelAsync(new OpenSecureChannelParameters
                     {
                         RequestType = SecurityTokenRequestType.Issue,
                         SecurityMode = MessageSecurityMode.None,
                         ClientNonce = null,
                         RequestedLifetime = 60000
-                    }).ConfigureAwait(false);
+                    }, cancellationToken).ConfigureAwait(false);
 
-                    endpoints = await conn.GetEndpointsAsync(endpointUrl).ConfigureAwait(false);
+                    endpoints = await conn.GetEndpointsAsync(endpointUrl, cancellationToken).ConfigureAwait(false);
                 }
                 finally
                 {

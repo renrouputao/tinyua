@@ -1,6 +1,7 @@
 using System;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Threading;
 using System.Threading.Tasks;
 using TinyUa.Client.Security;
 using TinyUa.Client.Services;
@@ -36,7 +37,7 @@ namespace TinyUa.Client.Connection
         /// Runs the handshake. On return the connection has an activated session; on failure the
         /// underlying transport may be in any state and the caller is expected to clean up.
         /// </summary>
-        internal async Task ConnectAsync(string endpointUrl)
+        internal async Task ConnectAsync(string endpointUrl, CancellationToken cancellationToken = default)
         {
             var uri = new Uri(endpointUrl);
             var host = uri.Host;
@@ -72,7 +73,7 @@ namespace TinyUa.Client.Connection
             if (isSecure && security.AutoDiscoverServerCertificate)
             {
                 _logger.LogDebug("Discovering server endpoints via GetEndpoints (None policy)...");
-                var endpoints = await DiscoverEndpointsAsync(host, port, endpointUrl).ConfigureAwait(false);
+                var endpoints = await DiscoverEndpointsAsync(host, port, endpointUrl, cancellationToken).ConfigureAwait(false);
                 SecurityDebugLogger.LogStage("Connect.GetEndpoints",
                     ("endpointCount", endpoints?.Length ?? 0),
                     ("requestedPolicy", security.Policy),
@@ -126,8 +127,8 @@ namespace TinyUa.Client.Connection
             // Use discovered endpoint URL if available, otherwise user-provided
             var effectiveUrl = selected?.EndpointUrl ?? endpointUrl;
 
-            await _connection.ConnectAsync(host, port).ConfigureAwait(false);
-            await _connection.SendHelloAsync(effectiveUrl, _options.MaxMessageSize).ConfigureAwait(false);
+            await _connection.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
+            await _connection.SendHelloAsync(effectiveUrl, _options.MaxMessageSize, cancellationToken).ConfigureAwait(false);
 
             var clientNonce = new byte[policy.NonceLength];
             if (clientNonce.Length > 0)
@@ -139,10 +140,10 @@ namespace TinyUa.Client.Connection
                 SecurityMode = resolvedMode,
                 ClientNonce = clientNonce.Length > 0 ? clientNonce : null,
                 RequestedLifetime = _options.ChannelLifetime
-            }).ConfigureAwait(false);
+            }, cancellationToken).ConfigureAwait(false);
 
             var createResponse = await _connection.CreateSessionAsync(effectiveUrl, _options.ApplicationName,
-                _options.ApplicationUri, _options.ProductUri, (uint)_options.SessionTimeout).ConfigureAwait(false);
+                _options.ApplicationUri, _options.ProductUri, (uint)_options.SessionTimeout, cancellationToken).ConfigureAwait(false);
 
             SecurityDebugLogger.LogStage("Connect.CreateSession",
                 ("sessionId", createResponse.SessionId),
@@ -152,31 +153,39 @@ namespace TinyUa.Client.Connection
                 ("endpointsCount", createResponse.ServerEndpoints?.Length ?? 0));
 
             var identity = UserIdentityFactory.Build(security.UserIdentity, createResponse, policy, userTokenPolicyId);
-            await _connection.ActivateSessionAsync(identity).ConfigureAwait(false);
+            await _connection.ActivateSessionAsync(identity, cancellationToken).ConfigureAwait(false);
         }
 
-        private async Task<EndpointDescription[]?> DiscoverEndpointsAsync(string host, int port, string endpointUrl)
+        private async Task<EndpointDescription[]?> DiscoverEndpointsAsync(
+            string host, int port, string endpointUrl, CancellationToken cancellationToken)
         {
-            await _connection.ConnectAsync(host, port).ConfigureAwait(false);
+            await _connection.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
             try
             {
-                await _connection.SendHelloAsync(endpointUrl, _options.MaxMessageSize).ConfigureAwait(false);
+                await _connection.SendHelloAsync(endpointUrl, _options.MaxMessageSize, cancellationToken).ConfigureAwait(false);
                 await _connection.OpenSecureChannelAsync(new OpenSecureChannelParameters
                 {
                     RequestType = SecurityTokenRequestType.Issue,
                     SecurityMode = MessageSecurityMode.None,
                     ClientNonce = null,
                     RequestedLifetime = 60000
-                }).ConfigureAwait(false);
+                }, cancellationToken).ConfigureAwait(false);
 
-                return await _connection.GetEndpointsAsync(endpointUrl).ConfigureAwait(false);
+                return await _connection.GetEndpointsAsync(endpointUrl, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
                 // Politely close the short-lived discovery channel before dropping the socket, so
                 // the server doesn't keep it half-open until its own timeout.
-                await _connection.CloseSecureChannelAsync().ConfigureAwait(false);
-                await _connection.DisconnectAsync().ConfigureAwait(false);
+                try
+                {
+                    if (!cancellationToken.IsCancellationRequested)
+                        await _connection.CloseSecureChannelAsync().ConfigureAwait(false);
+                }
+                finally
+                {
+                    await _connection.DisconnectAsync().ConfigureAwait(false);
+                }
             }
         }
 

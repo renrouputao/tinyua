@@ -1,6 +1,7 @@
 using TinyUa.Core;
 using System;
 using System.Security.Cryptography;
+using System.Threading;
 using System.Threading.Tasks;
 using TinyUa.Core.Logging;
 using TinyUa.Core.Binary;
@@ -61,7 +62,7 @@ namespace TinyUa.Client.Connection
 
         internal SecurityPolicy SecurityPolicy => _securityPolicy;
 
-        internal async Task ConnectAsync(string host, int port)
+        internal async Task ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
         {
             if (_socket != null)
             {
@@ -70,7 +71,7 @@ namespace TinyUa.Client.Connection
             }
             _socket = new UaSocketClient(_timeout, _securityPolicy, _logger);
             _socket.ConnectionLost += OnSocketConnectionLost;
-            await _socket.ConnectAsync(host, port).ConfigureAwait(false);
+            await _socket.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
         }
 
         private void OnSocketConnectionLost(Exception? ex)
@@ -85,8 +86,9 @@ namespace TinyUa.Client.Connection
             if (_socket != null) await _socket.DisconnectAsync().ConfigureAwait(false);
         }
 
-        internal async Task<Acknowledge> SendHelloAsync(string endpointUrl, uint maxMessageSize = 0)
-            => await _socket!.SendHelloAsync(endpointUrl, maxMessageSize).ConfigureAwait(false);
+        internal async Task<Acknowledge> SendHelloAsync(string endpointUrl, uint maxMessageSize = 0,
+            CancellationToken cancellationToken = default)
+            => await _socket!.SendHelloAsync(endpointUrl, maxMessageSize, cancellationToken: cancellationToken).ConfigureAwait(false);
 
         /// <summary>
         /// Builds a request header with the session token, a monotonically increasing request
@@ -107,19 +109,21 @@ namespace TinyUa.Client.Connection
         /// Sends a service request with a uniformly populated header, decodes the response, and
         /// checks the service result. The one entry point for all session-level services.
         /// </summary>
-        internal async Task<TResponse> InvokeAsync<TRequest, TResponse>(TRequest request)
+        internal async Task<TResponse> InvokeAsync<TRequest, TResponse>(TRequest request,
+            CancellationToken cancellationToken = default)
             where TRequest : IServiceRequest
             where TResponse : IDecodable<TResponse>, IServiceResponse
         {
             request.RequestHeader = CreateRequestHeader((uint)Math.Max(_timeout, 0));
-            var body = await _socket!.SendRequestAsync(request).ConfigureAwait(false);
+            var body = await _socket!.SendRequestAsync(request, cancellationToken: cancellationToken).ConfigureAwait(false);
             var decoder = new BinaryDecoder(body);
             var response = TResponse.Decode(decoder);
             response.ResponseHeader.ServiceResult.Check();
             return response;
         }
 
-        internal async Task<EndpointDescription[]?> GetEndpointsAsync(string endpointUrl)
+        internal async Task<EndpointDescription[]?> GetEndpointsAsync(string endpointUrl,
+            CancellationToken cancellationToken = default)
         {
             var request = new GetEndpointsRequest
             {
@@ -127,12 +131,13 @@ namespace TinyUa.Client.Connection
                 LocaleIds = null,
                 ProfileUris = null
             };
-            var response = await InvokeAsync<GetEndpointsRequest, GetEndpointsResponse>(request).ConfigureAwait(false);
+            var response = await InvokeAsync<GetEndpointsRequest, GetEndpointsResponse>(request, cancellationToken).ConfigureAwait(false);
             return response.Endpoints;
         }
 
-        internal async Task<OpenSecureChannelResult> OpenSecureChannelAsync(OpenSecureChannelParameters parameters)
-            => await _socket!.OpenSecureChannelAsync(parameters).ConfigureAwait(false);
+        internal async Task<OpenSecureChannelResult> OpenSecureChannelAsync(OpenSecureChannelParameters parameters,
+            CancellationToken cancellationToken = default)
+            => await _socket!.OpenSecureChannelAsync(parameters, cancellationToken).ConfigureAwait(false);
 
         internal async Task<OpenSecureChannelResult> RenewSecureChannelAsync(uint requestedLifetime = 3600000)
         {
@@ -170,7 +175,8 @@ namespace TinyUa.Client.Connection
         }
 
         internal async Task<CreateSessionResponse> CreateSessionAsync(string endpointUrl, string sessionName = "OpcUa Session",
-            string? applicationUri = null, string? productUri = null, uint requestedSessionTimeout = 3600000)
+            string? applicationUri = null, string? productUri = null, uint requestedSessionTimeout = 3600000,
+            CancellationToken cancellationToken = default)
         {
             var clientNonce = new byte[_securityPolicy.NonceLength > 0 ? _securityPolicy.NonceLength : 32];
             if (clientNonce.Length > 0)
@@ -194,7 +200,7 @@ namespace TinyUa.Client.Connection
                     RequestedSessionTimeout = requestedSessionTimeout
                 }
             };
-            var response = await InvokeAsync<CreateSessionRequest, CreateSessionResponse>(request).ConfigureAwait(false);
+            var response = await InvokeAsync<CreateSessionRequest, CreateSessionResponse>(request, cancellationToken).ConfigureAwait(false);
 
             // Verify the server's signature before trusting the response. Per OPC UA Part 4 §5.6.2,
             // the server signs clientCertificate || clientNonce with its private key, proving it
@@ -214,13 +220,14 @@ namespace TinyUa.Client.Connection
             return response;
         }
 
-        internal async Task ActivateSessionAsync(UserIdentityToken? userIdentity = null)
+        internal async Task ActivateSessionAsync(UserIdentityToken? userIdentity = null,
+            CancellationToken cancellationToken = default)
         {
             var parameters = new ActivateSessionParameters { UserIdentity = userIdentity };
             ComputeClientSignature(parameters);
 
             var request = new ActivateSessionRequest { Parameters = parameters };
-            await InvokeAsync<ActivateSessionRequest, ActivateSessionResponse>(request).ConfigureAwait(false);
+            await InvokeAsync<ActivateSessionRequest, ActivateSessionResponse>(request, cancellationToken).ConfigureAwait(false);
         }
 
         internal async Task ActivateSessionAsync(NodeId sessionId, NodeId authenticationToken, UserIdentityToken? userIdentity = null)
@@ -344,7 +351,8 @@ namespace TinyUa.Client.Connection
             return response.Results;
         }
 
-        internal async Task<ReadResult[]?> ReadAsync(NodeId[] nodeIds, AttributeId attributeId = AttributeId.Value)
+        internal async Task<ReadResult[]?> ReadAsync(NodeId[] nodeIds, AttributeId attributeId = AttributeId.Value,
+            CancellationToken cancellationToken = default)
         {
             var nodesToRead = new ReadValueId[nodeIds.Length];
             for (int i = 0; i < nodeIds.Length; i++)
@@ -354,7 +362,7 @@ namespace TinyUa.Client.Connection
             {
                 Parameters = new ReadParameters { MaxAge = 0, TimestampsToReturn = TimestampsToReturn.Both, NodesToRead = nodesToRead }
             };
-            var response = await InvokeAsync<ReadRequest, ReadResponse>(request).ConfigureAwait(false);
+            var response = await InvokeAsync<ReadRequest, ReadResponse>(request, cancellationToken).ConfigureAwait(false);
 
             var results = new ReadResult[nodeIds.Length];
             for (int i = 0; i < nodeIds.Length; i++)

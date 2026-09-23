@@ -153,6 +153,7 @@ namespace TinyUa.Client
         /// <exception cref="InvalidOperationException">No endpoint URL has been set.</exception>
         /// <exception cref="ObjectDisposedException">Client has been disposed.</exception>
         /// <exception cref="UaConnectionException">All reconnect attempts failed.</exception>
+        /// <exception cref="OperationCanceledException">The connection attempt was cancelled.</exception>
         public async Task RunAsync(CancellationToken cancellationToken)
         {
             if (string.IsNullOrEmpty(_endpointUrl))
@@ -161,6 +162,7 @@ namespace TinyUa.Client
 
             ThrowIfDisposed();
 
+            cancellationToken.ThrowIfCancellationRequested();
             bool startConnecting = _stateMachine.Transition(state =>
             {
                 ThrowIfDisposed();
@@ -178,14 +180,18 @@ namespace TinyUa.Client
             {
                 try
                 {
-                    await ConnectInternalAsync(_endpointUrl).ConfigureAwait(false);
+                    await ConnectInternalAsync(_endpointUrl, cancellationToken).ConfigureAwait(false);
 
                     return;
                 }
+                catch (Exception ex) when (cancellationToken.IsCancellationRequested)
+                {
+                    await AbortConnectAsync().ConfigureAwait(false);
+                    throw new OperationCanceledException("Connection attempt cancelled.", ex, cancellationToken);
+                }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
-                    _stateMachine.Set(ClientState.Disconnected);
-                    try { await StopAsync().ConfigureAwait(false); } catch { }
+                    await AbortConnectAsync().ConfigureAwait(false);
 
                     retries++;
                     if (maxRetries >= 0 && retries > maxRetries)
@@ -206,18 +212,32 @@ namespace TinyUa.Client
                     var delay = backoff.NextDelay();
                     _logger.LogWarning(ex, $"Connect attempt {retries} failed, retrying in {delay}ms");
                     try { await Task.Delay(delay, cancellationToken).ConfigureAwait(false); }
-                    catch (OperationCanceledException) { return; }
+                    catch (OperationCanceledException)
+                    {
+                        await AbortConnectAsync().ConfigureAwait(false);
+                        throw;
+                    }
                 }
             }
         }
 
-        private async Task ConnectInternalAsync(string endpointUrl)
+        private async Task AbortConnectAsync()
+        {
+            // A failed/cancelled handshake may already have a session but an unresponsive
+            // peer. Close the transport first so graceful cleanup cannot wait on that peer.
+            StopAndDisposeKeepAlive();
+            try { await _client.DisconnectAsync().ConfigureAwait(false); } catch { }
+            try { await StopAsync().ConfigureAwait(false); } catch { }
+        }
+
+        private async Task ConnectInternalAsync(string endpointUrl, CancellationToken cancellationToken)
         {
             _endpointUrl = endpointUrl;
 
             using var loggerScope = SecurityDebugLogger.BeginScope(_logger);
 
-            await _orchestrator.ConnectAsync(endpointUrl).ConfigureAwait(false);
+            await _orchestrator.ConnectAsync(endpointUrl, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
 
             _client.ConnectionLost += OnSocketConnectionLost;
 
@@ -249,8 +269,8 @@ namespace TinyUa.Client
                     // (e.g. ServerArray, NodeIds[]) pays a one-time ~0.3ms JIT cost for
                     // DecodeArrayValue — the last remaining gap vs. the OPCF SDK's first-read
                     // latency.
-                    var warmupResults = await ReadAsync(
-                        new[] { new NodeId(2259u), new NodeId(2254u) }, AttributeId.Value).ConfigureAwait(false);
+                    var warmupResults = await _client.ReadAsync(
+                        new[] { new NodeId(2259u), new NodeId(2254u) }, AttributeId.Value, cancellationToken).ConfigureAwait(false);
                     if (warmupResults is { Length: > 0 } && warmupResults[0].StatusCode.IsGood)
                     {
                         _logger.LogDebug($"Warmup read OK: ServerStatus.State={warmupResults[0].DataValue?.Value?.Value}, ServerArray=[{warmupResults.Length}] nodes");
@@ -260,12 +280,13 @@ namespace TinyUa.Client
                         _logger.LogWarning("Warmup read returned a bad or empty result (ignored)");
                     }
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
                     _logger.LogWarning(ex, "Warmup read of Server.ServerStatus failed (ignored)");
                 }
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             var sessionId = _client.SessionId;
             var authToken = _client.AuthenticationToken ?? new NodeId();
             _reconnectEngine = new ReconnectEngine(_client, _options, _logger);

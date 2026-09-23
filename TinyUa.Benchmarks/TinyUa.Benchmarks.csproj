@@ -9,6 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="..\TinyUa.Client.Tests\Testing\UaFaultProxy.cs" Link="Testing\UaFaultProxy.cs" />
     <PackageReference Include="BenchmarkDotNet" Version="0.15.0" />
   </ItemGroup>
 

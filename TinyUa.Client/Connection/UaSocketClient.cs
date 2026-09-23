@@ -69,7 +69,7 @@ namespace TinyUa.Client.Connection
 
         internal event Action<Exception?>? ConnectionLost;
 
-        internal async Task ConnectAsync(string host, int port)
+        internal async Task ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
         {
             _socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             _socket.NoDelay = true;
@@ -80,7 +80,7 @@ namespace TinyUa.Client.Connection
             _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 5);
             _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 3);
 
-            await _socket.ConnectAsync(host, port);
+            await _socket.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
             _stream = new NetworkStream(_socket, true);
         }
 
@@ -154,6 +154,25 @@ namespace TinyUa.Client.Connection
             ArraySegment<byte> first, ArraySegment<byte> second, CancellationToken cancellationToken)
         {
             var socket = _socket ?? throw new InvalidOperationException("Socket is not connected");
+            // The gather-send overload has no cancellation support on .NET 8. For
+            // cancellable handshakes use the memory overload and await actual I/O completion
+            // before returning any pooled header/body buffers.
+            if (cancellationToken.CanBeCanceled)
+            {
+                foreach (var segment in new[] { first, second })
+                {
+                    var remaining = segment.AsMemory();
+                    while (!remaining.IsEmpty)
+                    {
+                        var sent = await socket.SendAsync(remaining, SocketFlags.None, cancellationToken)
+                            .ConfigureAwait(false);
+                        if (sent <= 0)
+                            throw new SocketException((int)SocketError.ConnectionReset);
+                        remaining = remaining.Slice(sent);
+                    }
+                }
+                return;
+            }
             var segments = new List<ArraySegment<byte>>(2) { first, second };
 
             while (segments.Count > 0)
@@ -235,7 +254,8 @@ namespace TinyUa.Client.Connection
 
         internal bool IsDead => _dead;
 
-        internal async Task<Acknowledge> SendHelloAsync(string endpointUrl, uint maxMessageSize = 0, uint maxChunkCount = 0)
+        internal async Task<Acknowledge> SendHelloAsync(string endpointUrl, uint maxMessageSize = 0,
+            uint maxChunkCount = 0, CancellationToken cancellationToken = default)
         {
             var hello = new Hello
             {
@@ -259,16 +279,24 @@ namespace TinyUa.Client.Connection
                 header.Length = 8;
 
                 _logger.LogDebug($"Sending Hello: {header.Length + body.Count} bytes");
-                await SendSegmentsAsync(header.Segment, body, CancellationToken.None)
-                    .WithTimeout(_timeout, "Hello write operation timed out");
+                using var writeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                if (_timeout > 0) writeCancellation.CancelAfter(_timeout);
+                try
+                {
+                    await SendSegmentsAsync(header.Segment, body, writeCancellation.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new TimeoutException("Hello write operation timed out");
+                }
             }
             finally
             {
                 ReturnEncoder(encoder);
             }
 
-            var responseHeaderTask = ReadHeaderDirectAsync();
-            var responseHeader = await responseHeaderTask.WithTimeout(_timeout, "Hello response header read timed out");
+            var responseHeader = await WaitWithTimeoutAsync(ReadHeaderDirectAsync(cancellationToken),
+                "Hello response header read timed out", cancellationToken).ConfigureAwait(false);
 
             _logger.LogDebug($"Received response header: {responseHeader}");
 
@@ -276,8 +304,10 @@ namespace TinyUa.Client.Connection
             var read = 0;
             while (read < responseBody.Length)
             {
-                var readTask = _stream.ReadAsync(responseBody, read, responseBody.Length - read);
-                var bytesRead = await readTask.WithTimeout(_timeout, "Hello response body read timed out");
+                var readTask = _stream.ReadAsync(responseBody, read, responseBody.Length - read, cancellationToken);
+                var bytesRead = await WaitWithTimeoutAsync(readTask,
+                    "Hello response body read timed out", cancellationToken).ConfigureAwait(false);
+                if (bytesRead == 0) throw new EndOfStreamException("Peer closed during Hello response body.");
                 read += bytesRead;
             }
 
@@ -299,7 +329,7 @@ namespace TinyUa.Client.Connection
             throw new UaException(0x80000000, "Unexpected response to Hello");
         }
 
-        private async Task<Header> ReadHeaderDirectAsync()
+        private async Task<Header> ReadHeaderDirectAsync(CancellationToken cancellationToken = default)
         {
             if (_stream == null)
                 throw new InvalidOperationException("Socket is not connected");
@@ -308,14 +338,17 @@ namespace TinyUa.Client.Connection
             var read = 0;
             while (read < 8)
             {
-                read += await _stream!.ReadAsync(headerBuffer, read, 8 - read);
+                var bytesRead = await _stream!.ReadAsync(headerBuffer, read, 8 - read, cancellationToken).ConfigureAwait(false);
+                if (bytesRead == 0) throw new EndOfStreamException("Peer closed during Hello response header.");
+                read += bytesRead;
             }
 
             var decoder = new BinaryDecoder(headerBuffer);
             return Header.Decode(decoder);
         }
 
-        internal async Task<OpenSecureChannelResult> OpenSecureChannelAsync(OpenSecureChannelParameters parameters)
+        internal async Task<OpenSecureChannelResult> OpenSecureChannelAsync(OpenSecureChannelParameters parameters,
+            CancellationToken cancellationToken = default)
         {
             var request = new OpenSecureChannelRequest
             {
@@ -324,7 +357,7 @@ namespace TinyUa.Client.Connection
 
             _logger.LogDebug("Sending OpenSecureChannel request...");
 
-            var response = await SendRequestAsync(request, MessageType.SecureOpen);
+            var response = await SendRequestAsync(request, MessageType.SecureOpen, cancellationToken);
 
             _logger.LogDebug($"Received OpenSecureChannel response: {response.Length} bytes");
 
@@ -360,6 +393,7 @@ namespace TinyUa.Client.Connection
 
         internal async Task<byte[]> SendRequestAsync<T>(T request, byte[]? messageType = null, CancellationToken cancellationToken = default) where T : IEncodable
         {
+            cancellationToken.ThrowIfCancellationRequested();
             messageType ??= MessageType.SecureMessage;
 
             var encoder = RentEncoder();
@@ -387,7 +421,15 @@ namespace TinyUa.Client.Connection
             // and stay consistent with SendEncodedBodyAsync below.
             var tcs = new TaskCompletionSource<byte[]>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                ReturnEncoder(encoder);
+                throw;
+            }
             try
             {
                 if (_stream == null)
@@ -429,13 +471,36 @@ namespace TinyUa.Client.Connection
 
             try
             {
-                return await tcs.Task.WithTimeout(_timeout, $"Request {requestId} response timed out").ConfigureAwait(false);
+                return await WaitWithTimeoutAsync(tcs.Task,
+                    $"Request {requestId} response timed out", cancellationToken).ConfigureAwait(false);
             }
             catch (TimeoutException)
             {
                 _callbacks.TryRemove(requestId, out _);
                 _logger.LogWarning($"Request {requestId} TIMED OUT — IsAlive={IsAlive}, pending callbacks={_callbacks.Count}");
                 throw;
+            }
+            catch (OperationCanceledException)
+            {
+                _callbacks.TryRemove(requestId, out _);
+                throw;
+            }
+        }
+
+        private async Task<T> WaitWithTimeoutAsync<T>(Task<T> task, string errorMessage,
+            CancellationToken cancellationToken)
+        {
+            if (_timeout <= 0)
+                return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+            try
+            {
+                return await task.WaitAsync(TimeSpan.FromMilliseconds(_timeout), cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                throw new TimeoutException(errorMessage);
             }
         }
 

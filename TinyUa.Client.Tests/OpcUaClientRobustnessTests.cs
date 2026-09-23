@@ -71,6 +71,20 @@ public class OpcUaClientTests
     }
 
     [Fact]
+    public async Task RunAsync_CancellationToken_CancelsInitialConnectAndResetsState()
+    {
+        await using var client = new UaClient("opc.tcp://192.0.2.1:4840",
+            new UaClientOptions { ReconnectMaxRetries = 0 });
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.RunAsync(cancellation.Token));
+
+        Assert.Equal(ClientState.Disconnected, client.State);
+    }
+
+    [Fact]
     public async Task ReadAsync_NullNodeId_ThrowsArgumentNullException()
     {
         var client = new UaClient("opc.tcp://localhost:4840", new UaClientOptions { ReconnectMaxRetries = 0, Timeout = 500 });
