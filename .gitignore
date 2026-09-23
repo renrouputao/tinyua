@@ -47,3 +47,4 @@ dotnet-tools.json
 # ── Temporary tools ──
 tools/
 docs/
+/TinyUa.Benchmarks/CONNECTION-TEST-RESULTS.md
