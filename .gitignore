@@ -1,6 +1,7 @@
 # ── .NET Build Artifacts ──
 [Bb]in/
 [Oo]bj/
+[Tt]est[Rr]esults/
 *.user
 *.suo
 *.cache
@@ -49,3 +50,4 @@ tools/
 docs/
 /TinyUa.Benchmarks/CONNECTION-TEST-RESULTS.md
 /TinyUa.Benchmarks/SERVER-COMPATIBILITY.md
+/audit
