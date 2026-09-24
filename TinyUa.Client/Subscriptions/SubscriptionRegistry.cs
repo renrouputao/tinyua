@@ -18,13 +18,20 @@ namespace TinyUa.Client.Subscriptions
         internal void Add(Subscription subscription)
         {
             lock (_lock)
+            {
+                if (subscription.IsSubscriptionDisposed) throw new ObjectDisposedException(nameof(Subscription));
                 _active.Add(subscription);
+                subscription.Disposed += Remove;
+            }
         }
 
         internal void Remove(Subscription subscription)
         {
             lock (_lock)
+            {
                 _active.Remove(subscription);
+                subscription.Disposed -= Remove;
+            }
         }
 
         internal Subscription[] Snapshot()
@@ -57,7 +64,7 @@ namespace TinyUa.Client.Subscriptions
         /// creates one via <paramref name="factory"/>. Concurrent calls for the same interval
         /// share a single in-flight creation.
         /// </summary>
-        internal async Task<Subscription> GetOrCreateAsync(double interval, Func<Task<Subscription>> factory)
+        internal async Task<Subscription> GetOrCreateAsync(double interval, Func<Task<Subscription>> factory, CancellationToken cancellationToken = default)
         {
             TaskCompletionSource<Subscription>? pending;
             bool iAmCreator;
@@ -72,7 +79,7 @@ namespace TinyUa.Client.Subscriptions
             {
                 foreach (var sub in _active)
                 {
-                    if (Math.Abs(sub.PublishingInterval - interval) < 0.001)
+                    if (!sub.IsSubscriptionDisposed && Math.Abs(sub.PublishingInterval - interval) < 0.001)
                         return sub;
                 }
 
@@ -90,23 +97,24 @@ namespace TinyUa.Client.Subscriptions
             }
 
             if (!iAmCreator)
-                return await pending!.Task.ConfigureAwait(false);
+                return await pending!.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
 
             try
             {
                 var sub = await factory().ConfigureAwait(false);
-                pending!.SetResult(sub);
+                if (!pending!.TrySetResult(sub)) { sub.Dispose(); throw new ObjectDisposedException(nameof(SubscriptionRegistry)); }
                 return sub;
             }
             catch (Exception ex)
             {
-                pending!.SetException(ex);
+                pending!.TrySetException(ex);
                 throw;
             }
             finally
             {
                 lock (_lock)
-                    _pendingCreates.Remove(intervalKey);
+                    if (_pendingCreates.TryGetValue(intervalKey, out var current) && ReferenceEquals(current, pending))
+                        _pendingCreates.Remove(intervalKey);
             }
         }
     }

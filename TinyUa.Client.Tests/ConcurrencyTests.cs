@@ -37,10 +37,10 @@ public class ConcurrencyTests
 
     private static async Task<UaClient?> TryConnectAsync(uint timeout = 2000)
     {
-        var client = new UaClient("opc.tcp://localhost:4840",
+        var client = new UaClient(LiveServerFactAttribute.Endpoint,
             new UaClientOptions { ReconnectMaxRetries = 0, Timeout = timeout });
         try { await client.RunAsync().ConfigureAwait(false); }
-        catch { await client.DisposeAsync().ConfigureAwait(false); return null; }
+        catch { await client.DisposeAsync().ConfigureAwait(false); throw; }
         return client;
     }
 
@@ -279,11 +279,11 @@ public class ConcurrencyTests
         }
     }
 
-    [Fact]
+    [LiveServerFact]
     public async Task Integration_ConcurrentBrowseAsync_FromManyThreads_NoCrash()
     {
         var client = await TryConnectAsync();
-        if (client == null) return;
+        Assert.NotNull(client);
         try
         {
             var root = new NodeId(84, 0);
@@ -296,11 +296,11 @@ public class ConcurrencyTests
         finally { await client.DisposeAsync(); }
     }
 
-    [Fact]
+    [LiveServerFact]
     public async Task Integration_ConcurrentSubscribeAsync_SameInterval_NoDuplicateSubscription()
     {
         var client = await TryConnectAsync();
-        if (client == null) return;
+        Assert.NotNull(client);
         try
         {
             var node = new NodeId(2258, 0);
@@ -313,17 +313,17 @@ public class ConcurrencyTests
             Assert.True(subs.All(s => ReferenceEquals(s, subs[0])),
                 "Concurrent same-interval subscribes must share one Subscription");
 
-            var active = (List<Subscription>)GetPrivateField(client, "_activeSubscriptions")!;
+            var active = ((SubscriptionRegistry)GetPrivateField(client, "_subscriptions")!).Snapshot();
             Assert.Single(active);
         }
         finally { await client.DisposeAsync(); }
     }
 
-    [Fact]
+    [LiveServerFact]
     public async Task Integration_ConcurrentReadAndBrowse_NoDeadlock()
     {
         var client = await TryConnectAsync();
-        if (client == null) return;
+        Assert.NotNull(client);
         try
         {
             var node = new NodeId(2258, 0);
@@ -340,11 +340,11 @@ public class ConcurrencyTests
         finally { await client.DisposeAsync(); }
     }
 
-    [Fact]
+    [LiveServerFact]
     public async Task Integration_StopAsync_WhileBrowsing_CompletesCleanly()
     {
         var client = await TryConnectAsync();
-        if (client == null) return;
+        Assert.NotNull(client);
         try
         {
             var root = new NodeId(84, 0);
@@ -361,11 +361,11 @@ public class ConcurrencyTests
         finally { await client.DisposeAsync(); }
     }
 
-    [Fact]
+    [LiveServerFact]
     public async Task Integration_DisposeDuringActiveSubscribe_AbortsPending()
     {
         var client = await TryConnectAsync();
-        if (client == null) return;
+        Assert.NotNull(client);
 
         var node = new NodeId(2258, 0);
         var tasks = Enumerable.Range(0, 6)
@@ -379,12 +379,12 @@ public class ConcurrencyTests
         Assert.True(tasks.All(t => t.IsCompleted));
     }
 
-    [Fact]
+    [LiveServerFact]
     public async Task Integration_ServerClosesConnection_CallbacksFaultFast()
     {
 
         var client = await TryConnectAsync();
-        if (client == null) return;
+        Assert.NotNull(client);
         await client.DisposeAsync();
 
     }

@@ -360,9 +360,13 @@ namespace TinyUa.Core.Binary
             }
         }
 
-        /// <summary>
-        /// Resets the write position to 0, allowing the encoder to be reused without reallocating the internal buffer.
-        /// </summary>
+        internal void Clear()
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(_buffer.AsSpan(0, _position));
+            _position = 0;
+        }
+
+        /// <summary>Resets the write position without reallocating the internal buffer.</summary>
         public void Reset()
         {
             _position = 0;

@@ -23,7 +23,7 @@ namespace TinyUa.Client.Subscriptions
         private readonly object _lock = new();
         private readonly HashSet<Subscription> _attached = new();
         private int _inFlight;
-        private int _maxInFlight = 2;
+        private int _maxInFlight = 1;
         private volatile bool _running;
         private int _epoch;
         private Timer? _fallbackTimer;
@@ -50,6 +50,7 @@ namespace TinyUa.Client.Subscriptions
         {
             lock (_lock)
             {
+                if (subscription.IsSubscriptionDisposed || !subscription.IsPublishing) return;
                 _attached.Add(subscription);
                 if (maxPublishRequests > 0)
                     _maxInFlight = Math.Max(_maxInFlight, maxPublishRequests);
@@ -71,6 +72,7 @@ namespace TinyUa.Client.Subscriptions
             lock (_lock)
             {
                 _attached.Remove(subscription);
+                subscription.ReleaseAcknowledgements();
                 if (_attached.Count == 0 && _running)
                 {
                     _running = false;
@@ -93,14 +95,14 @@ namespace TinyUa.Client.Subscriptions
             // or not-yet-connected transport) releases its in-flight slot immediately, so an
             // unbounded refill loop would spin hot forever. Any shortfall is recovered by the
             // response callbacks and the fallback timer.
-            int epoch = Volatile.Read(ref _epoch);
-            for (int fired = 0; _running && fired < _maxInFlight;)
+            lock (_lock)
             {
-                int current = Volatile.Read(ref _inFlight);
-                if (current >= _maxInFlight) return;
-                if (Interlocked.CompareExchange(ref _inFlight, current + 1, current) != current) continue;
-                fired++;
-                SendOnePublishAsync(epoch).Forget(_logger, "PublishEngine.SendOnePublish");
+                int epoch = _epoch;
+                for (int fired = 0; _running && fired < _maxInFlight && _inFlight < _maxInFlight; fired++)
+                {
+                    _inFlight++;
+                    SendOnePublishAsync(epoch).Forget(_logger, "PublishEngine.SendOnePublish");
+                }
             }
         }
 
@@ -115,13 +117,14 @@ namespace TinyUa.Client.Subscriptions
                 List<SubscriptionAcknowledgement>? acks = null;
                 foreach (var sub in _attached)
                 {
-                    var seq = sub.LastSequenceNumber;
-                    if (seq == 0) continue;
-                    (acks ??= new List<SubscriptionAcknowledgement>()).Add(new SubscriptionAcknowledgement
+                    foreach (var seq in sub.TakeAcknowledgements())
                     {
-                        SubscriptionId = sub.SubscriptionId,
-                        SequenceNumber = seq
-                    });
+                        (acks ??= new List<SubscriptionAcknowledgement>()).Add(new SubscriptionAcknowledgement
+                        {
+                            SubscriptionId = sub.SubscriptionId,
+                            SequenceNumber = seq
+                        });
+                    }
                 }
                 return acks?.ToArray() ?? Array.Empty<SubscriptionAcknowledgement>();
             }
@@ -136,38 +139,66 @@ namespace TinyUa.Client.Subscriptions
                 return;
             }
 
+            var acknowledgements = BuildAcknowledgements();
             try
             {
-                await _router.SendPublishAsync(BuildAcknowledgements(),
-                    body => OnPublishResponseAsync(body, epoch),
-                    ex => OnPublishFaulted(ex, epoch),
-                    PublishResponseTimeout)
+                await _router.SendPublishAsync(acknowledgements,
+                    body => OnPublishResponseAsync(body, epoch, acknowledgements),
+                    ex => { FinishAcknowledgements(acknowledgements, null, epoch); OnPublishFaulted(ex, epoch); },
+                    GetResponseTimeout())
                     .ConfigureAwait(false);
             }
             catch (Exception ex)
             {
+                FinishAcknowledgements(acknowledgements, null, epoch);
                 // Synchronous send failure: per the SendRequestNoWait contract no callback will
                 // fire, so the in-flight slot is released here (and only here) — but only if
                 // the epoch hasn't changed (Detach already reset _inFlight).
-                if (epoch == Volatile.Read(ref _epoch))
-                    Interlocked.Decrement(ref _inFlight);
+                ReleaseCredit(epoch);
                 _logger.LogDebug(ex, "PublishEngine: publish send failed");
             }
         }
 
         private void OnPublishFaulted(Exception ex, int epoch)
         {
-            if (epoch == Volatile.Read(ref _epoch))
-                Interlocked.Decrement(ref _inFlight);
+            ReleaseCredit(epoch);
             _logger.LogDebug(ex, "PublishEngine: publish request faulted");
+            if (epoch == Volatile.Read(ref _epoch) && _running && (ex is TimeoutException || UaClient.IsConnectionError(ex)))
+                _router.ReportConnectionFailure(ex);
         }
 
-        private async Task OnPublishResponseAsync(byte[] body, int epoch)
+        private void ReleaseCredit(int epoch)
+        {
+            lock (_lock) { if (epoch == _epoch) _inFlight--; }
+        }
+
+        private TimeSpan GetResponseTimeout()
+        {
+            lock (_lock)
+                return TimeSpan.FromMilliseconds(Math.Clamp(_attached.Select(s => s.PublishingInterval * s.MaxKeepAliveCount * 2)
+                    .DefaultIfEmpty(0).Max(), PublishResponseTimeout.TotalMilliseconds, uint.MaxValue - 1));
+        }
+
+        private void FinishAcknowledgements(SubscriptionAcknowledgement[] sent, TinyUa.Core.Types.StatusCode[]? results, int epoch)
+        {
+            lock (_lock)
+            {
+                if (epoch != _epoch) return;
+                for (int i = 0; i < sent.Length; i++)
+                    if (_router.TryGet(sent[i].SubscriptionId, out var sub) && sub != null)
+                        sub.CompleteAcknowledgement(sent[i].SequenceNumber, results != null && i < results.Length
+                            && (results[i].IsGood || results[i].Value == 0x807A0000));
+            }
+        }
+
+        private async Task OnPublishResponseAsync(byte[] body, int epoch, SubscriptionAcknowledgement[] acknowledgements)
         {
             try
             {
                 var decoder = new BinaryDecoder(body);
                 var response = PublishResponse.Decode(decoder);
+                if (epoch != Volatile.Read(ref _epoch)) return;
+                FinishAcknowledgements(acknowledgements, response.Parameters.Results, epoch);
 
                 var subscriptionId = response.Parameters.SubscriptionId;
                 if (_router.TryGet(subscriptionId, out var target) && target != null && !target.IsSubscriptionDisposed)
@@ -181,6 +212,9 @@ namespace TinyUa.Client.Subscriptions
             }
             catch (Exception ex)
             {
+                FinishAcknowledgements(acknowledgements, null, epoch);
+                if (epoch == Volatile.Read(ref _epoch) && _running && UaClient.IsConnectionError(ex))
+                    _router.ReportConnectionFailure(ex);
                 // After Detach, in-flight publishes commonly complete with BadNoSubscription /
                 // BadSessionClosed service faults — expected teardown noise, not a warning.
                 if (!_running)
@@ -194,8 +228,7 @@ namespace TinyUa.Client.Subscriptions
                 // subscription queue or deliberately dropped. In Wait mode this is the point
                 // where a full queue becomes real backpressure: the finite Publish window cannot
                 // refill, including from the fallback timer.
-                if (epoch == Volatile.Read(ref _epoch))
-                    Interlocked.Decrement(ref _inFlight);
+                ReleaseCredit(epoch);
                 if (_running && epoch == Volatile.Read(ref _epoch))
                     TopUp();
             }

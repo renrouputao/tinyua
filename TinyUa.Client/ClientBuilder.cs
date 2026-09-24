@@ -35,6 +35,7 @@ namespace TinyUa.Client
             private readonly UaClientOptions _options = UaClientOptions.Default;
             private bool _reconnect = true;
             private ILogger? _logger;
+            private Func<FileLogger>? _fileLoggerFactory;
 
             internal ClientBuilder(string endpointUrl) { _endpointUrl = endpointUrl; }
 
@@ -88,9 +89,9 @@ namespace TinyUa.Client
                 return this;
             }
 
-            /// <summary>Set username/password authentication. The password is RSA-OAEP encrypted before transmission.</summary>
+            /// <summary>Set username/password authentication. Encryption follows the endpoint's user-token policy.</summary>
             /// <param name="username">The username.</param>
-            /// <param name="password">The password (plaintext, will be encrypted for transmission).</param>
+            /// <param name="password">The password; select a secure endpoint to protect credentials in transit.</param>
             public ClientBuilder WithUserName(string username, string password)
             {
                 _options.Security.UserIdentity.Type = TinyUa.Core.Security.UserTokenType.UserName;
@@ -100,7 +101,7 @@ namespace TinyUa.Client
             }
 
             /// <summary>Attach a custom <see cref="ILogger"/> implementation.</summary>
-            public ClientBuilder WithLogger(ILogger logger) { _logger = logger; return this; }
+            public ClientBuilder WithLogger(ILogger logger) { _logger = logger; _fileLoggerFactory = null; return this; }
 
             /// <summary>Enable console logging via a simple callback. For custom loggers, use <see cref="WithLogger"/> instead.</summary>
             /// <param name="sink">Callback receiving (LogLevel, Exception?, message).</param>
@@ -108,6 +109,7 @@ namespace TinyUa.Client
             public ClientBuilder EnableLog(Action<LogLevel, Exception?, string> sink, LogLevel minLevel = LogLevel.Debug)
             {
                 _logger = new DelegateLogger(sink, minLevel);
+                _fileLoggerFactory = null;
                 return this;
             }
 
@@ -117,7 +119,7 @@ namespace TinyUa.Client
             /// <param name="async">Use asynchronous file writes. Default false.</param>
             public ClientBuilder EnableLogFile(string directory, LogLevel minLevel = LogLevel.Debug, bool async = false)
             {
-                _logger = new FileLogger(directory, minLevel, async);
+                _fileLoggerFactory = () => new FileLogger(directory, minLevel, async);
                 return this;
             }
 
@@ -125,7 +127,9 @@ namespace TinyUa.Client
             public UaClient Build()
             {
                 _options.ReconnectMaxRetries = _reconnect ? _options.ReconnectMaxRetries : 0;
-                var client = new UaClient(_options, _logger);
+                var ownedLogger = _fileLoggerFactory?.Invoke();
+                var client = new UaClient(_options, ownedLogger ?? _logger);
+                client._ownedLogger = ownedLogger;
                 client._endpointUrl = _endpointUrl;
                 return client;
             }
@@ -135,8 +139,8 @@ namespace TinyUa.Client
             public async Task<UaClient> BuildAndRunAsync()
             {
                 var client = Build();
-                await client.RunAsync().ConfigureAwait(false);
-                return client;
+                try { await client.RunAsync().ConfigureAwait(false); return client; }
+                catch { await client.DisposeAsync().ConfigureAwait(false); throw; }
             }
         }
     }

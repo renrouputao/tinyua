@@ -53,6 +53,7 @@ namespace TinyUa.Core.Binary
 
         internal static void Return(BinaryEncoder encoder)
         {
+            encoder.Clear();
             Interlocked.Increment(ref s_returns);
             if (encoder.Capacity > MaxPooledEncoderCapacity)
             {

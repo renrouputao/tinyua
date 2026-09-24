@@ -80,7 +80,7 @@ internal static class KepwareTest
             var results = await secureClient.BrowseAsync("i=85");
             if (results != null && results.Length > 0 && results[0].References != null)
             {
-                topLevelRefs = results[0].References;
+                topLevelRefs = results[0].References!;
                 Ok($"Objects folder has {topLevelRefs.Length} children");
                 foreach (var r in topLevelRefs.Take(10))
                     Console.WriteLine($"     {r.NodeId}  {r.DisplayName?.Text}  (class={r.NodeClass})");
@@ -167,7 +167,7 @@ internal static class KepwareTest
                 var subResults = await secureClient.BrowseAsync(firstRef.NodeId);
                 if (subResults != null && subResults.Length > 0 && subResults[0].References != null)
                 {
-                    var subRefs = subResults[0].References;
+                    var subRefs = subResults[0].References!;
                     Console.WriteLine($"     Found {subRefs.Length} sub-nodes");
                     foreach (var r in subRefs.Take(5))
                         Console.WriteLine($"       {r.NodeId}  {r.DisplayName?.Text}  (class={r.NodeClass})");
@@ -190,6 +190,7 @@ internal static class KepwareTest
 
         Console.WriteLine($"═══════════════════════════════════════════");
         Console.WriteLine($"Results: {pass} passed, {fail} failed");
+        if (fail > 0) Environment.ExitCode = 1;
         Console.WriteLine();
     }
 }

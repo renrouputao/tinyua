@@ -15,9 +15,11 @@ internal sealed class UaFaultProxy : IAsyncDisposable
     private readonly Uri? _upstream;
     private readonly Task _acceptLoop;
     private int _accepted;
+    private int _writeRequests;
 
     internal string Url { get; }
     internal int Accepted => Volatile.Read(ref _accepted);
+    internal int UnsecuredWriteRequests => Volatile.Read(ref _writeRequests);
     internal TaskCompletionSource<bool> FaultReached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     internal int StallResponse { get; set; }
     internal int ForwardPrefixBytes { get; set; }
@@ -84,7 +86,7 @@ internal sealed class UaFaultProxy : IAsyncDisposable
                 upstream = new TcpClient { NoDelay = true };
                 await upstream.ConnectAsync(_upstream.Host, _upstream.Port > 0 ? _upstream.Port : 4840, lifetime.Token);
                 var source = upstream.GetStream();
-                upload = downstream.CopyToAsync(source, lifetime.Token);
+                upload = ForwardRequestsAsync(downstream, source, lifetime.Token);
                 var download = ForwardResponsesAsync(source, downstream, lifetime.Token);
                 await Task.WhenAny(upload, download);
                 lifetime.Cancel();
@@ -118,6 +120,20 @@ internal sealed class UaFaultProxy : IAsyncDisposable
                 await ApplyFaultAsync(destination, frame, ct);
                 return;
             }
+            await destination.WriteAsync(frame, ct);
+        }
+    }
+
+    private async Task ForwardRequestsAsync(NetworkStream source, NetworkStream destination, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            var frame = await ReadFrameAsync(source, ct);
+            // None-security, single-chunk WriteRequest: ns=0;i=673 follows the fixed header.
+            if (frame.Length >= 28 && frame.AsSpan(0, 4).SequenceEqual("MSGF"u8)
+                && frame[24] == 1 && frame[25] == 0
+                && BinaryPrimitives.ReadUInt16LittleEndian(frame.AsSpan(26)) == 673)
+                Interlocked.Increment(ref _writeRequests);
             await destination.WriteAsync(frame, ct);
         }
     }

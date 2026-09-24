@@ -20,6 +20,8 @@ namespace TinyUa.Client.Connection
         private readonly int _timeout;
         private readonly SecurityPolicy _securityPolicy;
         private readonly ConcurrentDictionary<uint, TaskCompletionSource<byte[]>> _callbacks;
+        private readonly ConcurrentDictionary<uint, Func<byte[], Task>> _responseHandlers = new();
+        private readonly ConcurrentDictionary<uint, Task> _startedHandlers = new();
         private readonly SecureConnection _connection;
         private readonly SemaphoreSlim _sendLock = new(1, 1);
         private readonly ILogger _logger;
@@ -34,6 +36,9 @@ namespace TinyUa.Client.Connection
         private Task? _receiveTask;
         private volatile bool _running;
         private volatile bool _dead;
+        private int _disposed;
+        private Exception? _writeFailure;
+        private uint _maxReceivePacketSize = 65536;
         private uint _requestId;
         private uint _revisedChannelLifetime;
         private long _lastRequestTicks = Environment.TickCount64;
@@ -65,7 +70,7 @@ namespace TinyUa.Client.Connection
 
         private void MarkRequestSent() => Volatile.Write(ref _lastRequestTicks, Environment.TickCount64);
 
-        internal bool IsAlive => Volatile.Read(ref _running) && _receiveTask != null && !_receiveTask.IsCompleted;
+        internal bool IsAlive => _running && _receiveTask != null && !_receiveTask.IsCompleted;
 
         internal event Action<Exception?>? ConnectionLost;
 
@@ -80,7 +85,11 @@ namespace TinyUa.Client.Connection
             _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 5);
             _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 3);
 
-            await _socket.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            if (_timeout > 0) deadline.CancelAfter(_timeout);
+            try { await _socket.ConnectAsync(host, port, deadline.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            { throw new TimeoutException("TCP connection timed out."); }
             _stream = new NetworkStream(_socket, true);
         }
 
@@ -108,17 +117,6 @@ namespace TinyUa.Client.Connection
             finally { if (got) _sendLock.Release(); }
         }
 
-        private void FaultAllCallbacks(Exception exception)
-        {
-            // An ERR frame is terminal for every outstanding request. Removing entries before
-            // completing them prevents stale callbacks from accumulating until a later close.
-            foreach (var pair in _callbacks)
-            {
-                if (_callbacks.TryRemove(pair.Key, out var callback))
-                    callback.TrySetException(exception);
-            }
-        }
-
         /// <summary>
         /// Writes a request while the caller owns <see cref="_sendLock"/>. Unsecured MSG frames
         /// are sent as [24-byte header, encoded body] with socket gather I/O, so the body is not
@@ -131,6 +129,31 @@ namespace TinyUa.Client.Connection
             if (_dead)
                 throw new SocketException((int)SocketError.ConnectionReset);
 
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            if (_timeout > 0) deadline.CancelAfter(_timeout);
+            try
+            {
+                return await WriteMessageCoreAsync(body, messageType, requestId, deadline.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                _writeFailure = new TimeoutException("Request write timed out.");
+                CloseTransport();
+                throw _writeFailure;
+            }
+            catch (OperationCanceledException ex) when (cancellationToken.IsCancellationRequested)
+            {
+                _writeFailure = ex;
+                CloseTransport();
+                throw new OperationCanceledException("Request write cancelled.", ex, cancellationToken);
+            }
+            catch (UaException ex) when (ex.StatusCode == 0x80B80000) { throw; }
+            catch (Exception ex) { _writeFailure = ex; CloseTransport(); throw; }
+        }
+
+        private async Task<int> WriteMessageCoreAsync(ArraySegment<byte> body, byte[] messageType, uint requestId, CancellationToken cancellationToken)
+        {
+
             using var header = BufferLease.Rent(24);
             if (_connection.TryWriteUnsecuredMessageHeader(body, messageType, requestId, header.CapacitySpan))
             {
@@ -141,13 +164,22 @@ namespace TinyUa.Client.Connection
 
             var chunks = _connection.CreateMessageChunks(body, messageType, requestId);
             var total = 0;
-            foreach (var chunk in chunks)
+            try
             {
-                using var message = chunk.ToBufferLease();
-                await _stream!.WriteAsync(message.Array, 0, message.Length, cancellationToken).ConfigureAwait(false);
-                total += message.Length;
+                foreach (var chunk in chunks)
+                {
+                    using var message = chunk.ToBufferLease();
+                    await _stream!.WriteAsync(message.Array, 0, message.Length, cancellationToken).ConfigureAwait(false);
+                    total += message.Length;
+                }
+                return total;
             }
-            return total;
+            finally
+            {
+                foreach (var chunk in chunks)
+                    if (!ReferenceEquals(chunk.Body, body.Array))
+                        System.Security.Cryptography.CryptographicOperations.ZeroMemory(chunk.Body);
+            }
         }
 
         private async Task SendSegmentsAsync(
@@ -205,7 +237,7 @@ namespace TinyUa.Client.Connection
         {
             _dead = true;
             _running = false;
-            _receiveCts?.Cancel();
+            try { _receiveCts?.Cancel(); } catch (ObjectDisposedException) { }
 
             try { _socket?.Shutdown(SocketShutdown.Both); } catch (Exception ex) { _logger.LogDebug(ex, "Socket shutdown (ignored)"); }
 
@@ -233,13 +265,21 @@ namespace TinyUa.Client.Connection
             var receiveTask = _receiveTask;
             if (receiveTask != null && !receiveTask.IsCompleted)
             {
-                try { await receiveTask.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); } catch { }
+                try { await receiveTask.ConfigureAwait(false); } catch { }
             }
             _receiveTask = null;
 
             var toCancel = await DrainCallbacksUnderSendLockAsync().ConfigureAwait(false);
             foreach (var cb in toCancel)
                 cb.TrySetCanceled();
+        }
+
+        internal async Task RetirePolicyAsync(SecurityPolicy policy)
+        {
+            await DisconnectAsync().ConfigureAwait(false);
+            await _sendLock.WaitAsync().ConfigureAwait(false);
+            try { policy.Dispose(); }
+            finally { _sendLock.Release(); }
         }
 
         internal void SimulateReceiveLoopExit()
@@ -295,18 +335,28 @@ namespace TinyUa.Client.Connection
                 ReturnEncoder(encoder);
             }
 
-            var responseHeader = await WaitWithTimeoutAsync(ReadHeaderDirectAsync(cancellationToken),
-                "Hello response header read timed out", cancellationToken).ConfigureAwait(false);
+            using var readDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            if (_timeout > 0) readDeadline.CancelAfter(_timeout);
+            Header responseHeader;
+            try { responseHeader = await ReadHeaderDirectAsync(readDeadline.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            { throw new TimeoutException("Hello response header read timed out"); }
 
             _logger.LogDebug($"Received response header: {responseHeader}");
 
+            if ((!responseHeader.IsAcknowledge && !responseHeader.IsError)
+                || responseHeader.ChunkType != ChunkType.Single
+                || responseHeader.BodySize < 0 || responseHeader.BodySize > 65528
+                || (responseHeader.IsAcknowledge && responseHeader.BodySize != 20))
+                throw new UaException(0x80800000, "Invalid Hello response header or length.");
             var responseBody = new byte[responseHeader.BodySize];
             var read = 0;
             while (read < responseBody.Length)
             {
-                var readTask = _stream.ReadAsync(responseBody, read, responseBody.Length - read, cancellationToken);
-                var bytesRead = await WaitWithTimeoutAsync(readTask,
-                    "Hello response body read timed out", cancellationToken).ConfigureAwait(false);
+                int bytesRead;
+                try { bytesRead = await _stream!.ReadAsync(responseBody.AsMemory(read), readDeadline.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                { throw new TimeoutException("Hello response body read timed out"); }
                 if (bytesRead == 0) throw new EndOfStreamException("Peer closed during Hello response body.");
                 read += bytesRead;
             }
@@ -315,7 +365,10 @@ namespace TinyUa.Client.Connection
             {
                 var decoder = new BinaryDecoder(responseBody);
                 var ack = Acknowledge.Decode(decoder);
+                if (ack.SendBufferSize < 8192) throw new UaException(0x80810000, "Invalid server send buffer size.");
+                _maxReceivePacketSize = Math.Min(hello.ReceiveBufferSize, ack.SendBufferSize);
                 _connection.ApplyAcknowledge(ack, hello.SendBufferSize);
+                _connection.SetReceiveLimits(maxMessageSize, maxChunkCount);
                 _logger.LogDebug($"Hello acknowledged: receiveBuffer={ack.ReceiveBufferSize}, sendBuffer={ack.SendBufferSize}, maxMessage={ack.MaxMessageSize}, maxChunks={ack.MaxChunkCount}");
                 StartReceiveLoop();
                 return ack;
@@ -399,18 +452,18 @@ namespace TinyUa.Client.Connection
             messageType ??= MessageType.SecureMessage;
 
             var encoder = RentEncoder();
-            request.Encode(encoder);
+            try { request.Encode(encoder); }
+            catch { ReturnEncoder(encoder); throw; }
 
             var bodySegment = encoder.GetBuffer();
 
-            var debugEnabled = _logger.IsEnabled(LogLevel.Debug);
-            if (debugEnabled)
+            bool debugEnabled;
+            try
             {
-                // Cap the hex dump — a full dump of a large body builds a 3x-length string.
-                var dumpLen = Math.Min(bodySegment.Count, 256);
-                var suffix = bodySegment.Count > dumpLen ? $" ... ({bodySegment.Count} bytes total)" : "";
-                _logger.LogDebug($"Request body ({bodySegment.Count} bytes): {BitConverter.ToString(bodySegment.Array!, bodySegment.Offset, dumpLen).Replace("-", " ")}{suffix}");
+                debugEnabled = _logger.IsEnabled(LogLevel.Debug);
+                if (debugEnabled) _logger.LogDebug($"Request {typeof(T).Name}: {bodySegment.Count} encoded bytes");
             }
+            catch { ReturnEncoder(encoder); throw; }
 
             var requestId = Interlocked.Increment(ref _requestId);
             // RunContinuationsAsynchronously is the safe default for a public SDK: the receive
@@ -425,7 +478,8 @@ namespace TinyUa.Client.Connection
 
             try
             {
-                await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+                if (!await _sendLock.WaitAsync(_timeout > 0 ? _timeout : Timeout.Infinite, cancellationToken).ConfigureAwait(false))
+                    throw new TimeoutException("Timed out waiting for send lock");
             }
             catch
             {
@@ -457,7 +511,7 @@ namespace TinyUa.Client.Connection
                 if (debugEnabled)
                     _logger.LogDebug($"Sending request {requestId}: {messageLength} bytes");
 
-                MarkRequestSent();
+                if (MessageType.Equals(messageType, MessageType.SecureMessage)) MarkRequestSent();
             }
             catch
             {
@@ -517,7 +571,8 @@ namespace TinyUa.Client.Connection
             messageType ??= MessageType.SecureMessage;
 
             var enc = RentEncoder();
-            request.Encode(enc);
+            try { request.Encode(enc); }
+            catch { ReturnEncoder(enc); throw; }
             var bodySegment = enc.GetBuffer();
 
             var requestId = Interlocked.Increment(ref _requestId);
@@ -526,7 +581,10 @@ namespace TinyUa.Client.Connection
             // WaitAsync(TimeSpan) returns false on timeout instead of throwing. Ignoring it would
             // let us send without the lock AND over-release the semaphore in finally, permanently
             // breaking send mutual exclusion.
-            if (!await _sendLock.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false))
+            bool acquired;
+            try { acquired = await _sendLock.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false); }
+            catch { ReturnEncoder(enc); throw; }
+            if (!acquired)
             {
                 ReturnEncoder(enc);
                 throw new TimeoutException("Timed out waiting for send lock");
@@ -544,15 +602,24 @@ namespace TinyUa.Client.Connection
                     }
                 }
 
-                _callbacks[requestId] = tcs;
+                if (callback != null || onError != null)
+                {
+                    _responseHandlers[requestId] = callback ?? (_ => Task.CompletedTask);
+                    _callbacks[requestId] = tcs;
+                }
 
                 await WriteMessageAsync(bodySegment, messageType, (uint)requestId).ConfigureAwait(false);
-                MarkRequestSent();
+                if (MessageType.Equals(messageType, MessageType.SecureMessage)) MarkRequestSent();
             }
             catch (Exception)
             {
-                _callbacks.TryRemove(requestId, out _);
-                throw;
+                if ((callback == null && onError == null) || _callbacks.TryRemove(requestId, out _))
+                {
+                    _responseHandlers.TryRemove(requestId, out _);
+                    throw;
+                }
+                // The receiver or disconnect already owns completion. Let the watcher report
+                // that outcome exactly once, even if the send continuation observes a failure.
             }
             finally
             {
@@ -570,62 +637,36 @@ namespace TinyUa.Client.Connection
 
         private async Task InvokeCallbackAsync(Task<byte[]> task, Func<byte[], Task>? callback, Action<Exception>? onError, TimeSpan? responseTimeout, uint requestId)
         {
-            byte[] result;
             try
             {
-                // When a response timeout is requested (e.g. for Publish long-polls), bound the
-                // wait so a silently-dropped response cannot pin an in-flight slot forever. The
-                // underlying tcs stays in _callbacks until either the response arrives (TrySetResult
-                // is a no-op on the already-timed-out wrapper) or the timeout handler removes it.
-                if (responseTimeout is { } timeout)
-                    result = await task.WaitAsync(timeout).ConfigureAwait(false);
-                else
-                    result = await task.ConfigureAwait(false);
-            }
-            catch (TimeoutException)
-            {
-                // Release the callback slot so a late response doesn't try to complete an already-
-                // abandoned tcs (TrySetResult would be a no-op anyway, but this frees the entry for
-                // GC and avoids a "no callback found" debug log on the receive loop). Then surface
-                // the timeout via onError so the caller can release its in-flight slot / retry.
-                _callbacks.TryRemove(requestId, out _);
-                var ts = responseTimeout!.Value;
-                if (onError != null)
+                try
                 {
-                    try { onError(new TimeoutException($"No response for request {requestId} within {ts.TotalSeconds:F0}s")); }
-                    catch (Exception cbEx) { _logger.LogError(cbEx, "SendRequestNoWait error callback failed (timeout)"); }
+                    if (responseTimeout is { } timeout) await task.WaitAsync(timeout).ConfigureAwait(false);
+                    else await task.ConfigureAwait(false);
                 }
-                else
+                catch (TimeoutException)
                 {
-                    _logger.LogDebug($"SendRequestNoWait request {requestId} timed out after {ts.TotalSeconds:F0}s (no error callback)");
+                    if (_callbacks.TryRemove(requestId, out _)) throw;
+                    // Receive or disconnect already owns completion. Observe that outcome,
+                    // including a disconnect fault racing the response deadline.
+                    await task.ConfigureAwait(false);
                 }
-                return;
             }
             catch (Exception ex)
             {
-                if (onError != null)
-                {
-                    try { onError(ex); }
-                    catch (Exception cbEx) { _logger.LogError(cbEx, "SendRequestNoWait error callback failed"); }
-                }
-                else
-                {
-                    _logger.LogDebug(ex, "SendRequestNoWait request faulted (no error callback)");
-                }
+                _responseHandlers.TryRemove(requestId, out _);
+                try { onError?.Invoke(ex); }
+                catch (Exception callbackError) { _logger.LogError(callbackError, "Request error callback failed"); }
                 return;
             }
 
             try
             {
-                if (callback != null)
-                    await callback(result).ConfigureAwait(false);
+                if (_startedHandlers.TryRemove(requestId, out var started))
+                    await started.ConfigureAwait(false);
             }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "SendRequestNoWait callback failed");
-            }
+            catch (Exception ex) { _logger.LogError(ex, "Request response callback failed"); }
         }
-
         internal async Task<TResponse> SendRequestAsync<TRequest, TResponse>(TRequest request, byte[]? messageType = null)
             where TRequest : IEncodable
             where TResponse : IDecodable<TResponse>
@@ -697,6 +738,7 @@ namespace TinyUa.Client.Connection
             byte[] buf = BufferLease.RentSharedArray(normalReceiveBufferSize);
             int len = 0;   // count of valid bytes in buf
             int pos = 0;   // parse cursor; bytes [0, pos) are already consumed
+            long partialStarted = 0;
 
             try
             {
@@ -730,24 +772,26 @@ namespace TinyUa.Client.Connection
                         int n;
                         try
                         {
-                            // Apply a receive deadline: if no bytes arrive within 60s the peer is
-                            // either dead or slow-drip-feeding partial frames to keep the loop
-                            // alive. TCP keepalive catches fully dead sockets (~25s), but a
-                            // drip-feed attacker keeps the TCP connection alive while starving
-                            // the application layer. Closing the socket forces reconnect.
-                            n = await _stream!.ReadAsync(buf, len, buf.Length - len, ct)
-                                .WaitAsync(TimeSpan.FromSeconds(60), ct)
+                            // Bound total assembly time, not time since the latest byte.
+                            // Idle sessions with no partial frame have no receive deadline.
+                            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                            if (len > 0)
+                            {
+                                var remaining = 60000 - (Environment.TickCount64 - partialStarted);
+                                if (remaining <= 0) throw new TimeoutException("Partial frame assembly timed out.");
+                                deadline.CancelAfter(TimeSpan.FromMilliseconds(remaining));
+                            }
+                            n = await _stream!.ReadAsync(buf.AsMemory(len, buf.Length - len), deadline.Token)
                                 .ConfigureAwait(false);
                         }
-                        catch (OperationCanceledException)
+                        catch (OperationCanceledException) when (ct.IsCancellationRequested)
                         {
                             _logger.LogDebug("Receive loop cancelled");
                             break;
                         }
-                        catch (TimeoutException)
+                        catch (OperationCanceledException)
                         {
-                            _logger.LogWarning("Receive loop: no data for 60s, closing connection (possible slow-drip or dead peer)");
-                            break;
+                            throw new TimeoutException("Partial frame assembly timed out.");
                         }
 
                         if (n == 0)
@@ -780,31 +824,11 @@ namespace TinyUa.Client.Connection
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogWarning(ex, $"Receive loop: message parsing failed (header={header}), attempting to fault callback and continue");
+                            _logger.LogWarning(ex, $"Receive loop: message parsing failed (header={header}), closing channel");
 
-                            if (header!.IsSecureMessage && body.Count >= 12)
-                            {
-                                try
-                                {
-                                    var reqId = BinaryPrimitives.ReadUInt32LittleEndian(body.Array!.AsSpan(body.Offset + 8, 4));
-                                    if (_callbacks.TryRemove(reqId, out var tcs))
-                                    {
-                                        tcs.TrySetException(ex);
-                                        if (debugEnabled)
-                                            _logger.LogDebug($"Faulted callback for request {reqId} after parse failure");
-                                    }
-                                }
-                                catch { }
-                            }
-                            else
-                            {
-                                FaultAllCallbacks(ex);
-                            }
-
-                            // The frame was parsed off the wire; advance past it so we do not
-                            // retry the same bad message forever.
-                            pos += msgLen;
-                            continue;
+                            // A failed authentication/framing check invalidates this channel.
+                            // Encrypted bytes cannot be used to infer a trustworthy request ID.
+                            throw;
                         }
 
                         if (debugEnabled)
@@ -817,6 +841,13 @@ namespace TinyUa.Client.Connection
 
                             if (_callbacks.TryRemove(msg.RequestId, out var tcs))
                             {
+                                // Invoke the dispatch entry points in wire order. Only awaiters
+                                // run asynchronously; the receive loop never waits on user work.
+                                if (_responseHandlers.TryRemove(msg.RequestId, out var handler))
+                                {
+                                    try { _startedHandlers[msg.RequestId] = handler(msg.Body); }
+                                    catch (Exception ex) { _startedHandlers[msg.RequestId] = Task.FromException(ex); }
+                                }
                                 tcs.TrySetResult(msg.Body);
                             }
                             else if (debugEnabled)
@@ -828,12 +859,14 @@ namespace TinyUa.Client.Connection
                         {
                             _logger.LogWarning($"Error message received: StatusCode=0x{err.Error.Value:X8}, Reason={err.Reason}");
 
-                            FaultAllCallbacks(new UaException(err.Error.Value,
-                                $"Server ErrorMessage: Code=0x{err.Error.Value:X8}, Reason={err.Reason ?? "(null)"}"));
+                            throw new UaException(err.Error.Value,
+                                $"Server ErrorMessage: Code=0x{err.Error.Value:X8}, Reason={err.Reason ?? "(null)"}");
                         }
 
                         pos += msgLen;
+                        partialStarted = 0;
                     }
+                    if (len > pos && partialStarted == 0) partialStarted = Environment.TickCount64;
 
                     // If the buffer is full but we still couldn't parse a complete message,
                     // grow it so the next read can accommodate the rest of the partial message.
@@ -855,10 +888,12 @@ namespace TinyUa.Client.Connection
             {
                 BufferLease.ReturnSharedArray(buf);
 
-                var unexpectedExit = _running;
+                var unexpectedExit = _running || _writeFailure != null;
+                exitException ??= _writeFailure;
 
                 _running = false;
                 _dead = true;
+                CloseTransport();
 
                 var toFault = await DrainCallbacksUnderSendLockAsync().ConfigureAwait(false);
                 if (toFault.Count > 0)
@@ -875,6 +910,7 @@ namespace TinyUa.Client.Connection
                     try { ConnectionLost?.Invoke(lostEx); }
                     catch (Exception evEx) { _logger.LogError(evEx, "ConnectionLost event handler threw"); }
                 }
+                _receiveCts?.Dispose();
             }
         }
 
@@ -904,7 +940,7 @@ namespace TinyUa.Client.Connection
             // Guard against malformed/adversarial sizes BEFORE the "need more data" check, so a
             // bad frame is rejected immediately rather than forcing the buffer to grow unbounded.
             const int MaxPacketSize = 8 + 4 + 16 * 1024 * 1024; // header + channelId + 16 MiB body
-            if (packetSize < 8 || packetSize > MaxPacketSize)
+            if (packetSize < 8 || packetSize > MaxPacketSize || packetSize > _maxReceivePacketSize)
                 throw new InvalidOperationException($"Invalid PacketSize: {packetSize}");
 
             // Wait until the entire message (header + channel id + body) is buffered.
@@ -964,11 +1000,11 @@ namespace TinyUa.Client.Connection
 
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             Disconnect();
-            _receiveCts?.Dispose();
-            _stream?.Dispose();
-            _socket?.Dispose();
-            _sendLock?.Dispose();
+            // SemaphoreSlim has no native handle unless AvailableWaitHandle is used. Leave it
+            // to GC: asynchronous send/fault continuations may still release it after Dispose.
+            // Cancelled ReadAsync is awaited by the receive loop before returning its buffer.
         }
     }
 }

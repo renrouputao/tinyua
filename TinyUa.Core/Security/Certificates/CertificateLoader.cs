@@ -9,16 +9,16 @@ namespace TinyUa.Core.Security.Certificates
         internal static X509Certificate2 LoadCertificate(string path, string? password = null)
         {
             var bytes = File.ReadAllBytes(path);
-            return LoadCertificate(bytes, password);
+            try { return LoadCertificate(bytes, password); }
+            finally { CryptographicOperations.ZeroMemory(bytes); }
         }
 
         internal static X509Certificate2 LoadCertificate(byte[] data, string? password = null)
         {
             if (IsPem(data))
                 return X509Certificate2.CreateFromPem(Encoding.ASCII.GetString(data));
-            return password != null
-                ? new X509Certificate2(data, password)
-                : new X509Certificate2(data);
+            return new X509Certificate2(data, password,
+                X509KeyStorageFlags.EphemeralKeySet | X509KeyStorageFlags.Exportable);
         }
 
         /// <summary>
@@ -48,24 +48,24 @@ namespace TinyUa.Core.Security.Certificates
         internal static RSA LoadPrivateKey(string path)
         {
             var bytes = File.ReadAllBytes(path);
-            return LoadPrivateKey(bytes);
+            try { return LoadPrivateKey(bytes); }
+            finally { CryptographicOperations.ZeroMemory(bytes); }
         }
 
         internal static RSA LoadPrivateKey(byte[] data)
         {
             var rsa = RSA.Create();
-            rsa.ImportFromPem(Encoding.ASCII.GetString(data));
-            return rsa;
+            try { rsa.ImportFromPem(Encoding.ASCII.GetString(data)); return rsa; }
+            catch { rsa.Dispose(); throw; }
         }
 
         internal static (X509Certificate2 Certificate, RSA PrivateKey) LoadCertificateWithKey(
             string certPath, string keyPath)
         {
-            var cert = LoadCertificate(certPath);
+            using var cert = LoadCertificate(certPath);
             var key = LoadPrivateKey(keyPath);
-            var combined = cert.CopyWithPrivateKey(key);
-            cert.Dispose();
-            return (combined, key);
+            try { return (cert.CopyWithPrivateKey(key), key); }
+            catch { key.Dispose(); throw; }
         }
     }
 }

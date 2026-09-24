@@ -14,7 +14,7 @@ public class KeepAliveManagerTests
     // 0 = automatic: sessionTimeout / 4 clamped to [1000, 60000].
     [InlineData(3600000, 0, 60000)]   // 1 h / 4 = 15 min -> capped at 60 s
     [InlineData(8000, 0, 2000)]       // 8 s / 4 = 2 s
-    [InlineData(2000, 0, 1000)]       // 2 s / 4 = 500 ms -> floored to 1 s
+    [InlineData(2000, 0, 500)]        // Respect short revised session lifetimes.
     // Unknown/invalid session timeout falls back to a 60 s threshold.
     [InlineData(0, 0, 60000)]
     [InlineData(-1, 0, 60000)]

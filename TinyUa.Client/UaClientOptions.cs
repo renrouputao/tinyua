@@ -35,7 +35,8 @@ namespace TinyUa.Client
         /// <summary>
         /// Per-step network wait timeout in milliseconds. Controls the maximum wait for each socket send/receive
         /// and each reconnect attempt. Not the total Read/Write call timeout — if reconnect + retry are triggered,
-        /// actual elapsed time may be 2–4x this value. Default 30000 (30 seconds). Set to 0 to use server default.
+        /// actual elapsed time may exceed this value. Default 30000 (30 seconds). Zero disables
+        /// the per-request deadline; Publish responses and incomplete frames remain bounded.
         /// </summary>
         public uint Timeout { get; set; } = 30000;
 
@@ -48,8 +49,9 @@ namespace TinyUa.Client
         /// no request has gone out for this long; ordinary reads/writes/publish requests already
         /// refresh the session lifetime, so under continuous traffic no heartbeat is sent at all.
         /// When the session stays idle, this value becomes the heartbeat interval.
-        /// 0 (default) = automatic: a quarter of <see cref="SessionTimeout"/>, clamped to
-        /// [1000, 60000] ms. A negative value disables the heartbeat.
+        /// 0 (default) = automatic: a quarter of the server's revised session timeout, capped at
+        /// 60000 ms. Explicit positive intervals are also capped at a quarter of that lifetime.
+        /// A negative value disables the heartbeat.
         /// </summary>
         public int SessionKeepAliveIntervalMs { get; set; } = 0;
 
@@ -66,7 +68,8 @@ namespace TinyUa.Client
         /// </summary>
         public bool WarmupOnConnect { get; set; } = true;
 
-        /// <summary>Maximum message size in bytes. 0 means unlimited (use server default).</summary>
+        /// <summary>Maximum incoming message body size in bytes advertised in Hello.
+        /// Zero advertises no limit; internal 64 MiB / 1024-chunk safety caps still apply.</summary>
         public uint MaxMessageSize { get; set; } = 0;
 
         /// <summary>Error handling strategy for failed operations. Default <see cref="Client.ErrorMode.Throw"/>.</summary>
@@ -158,9 +161,16 @@ namespace TinyUa.Client
         /// </summary>
         public bool AutoDiscoverServerCertificate { get; set; } = true;
 
+        /// <summary>DER/PEM server certificate path when automatic discovery is disabled.</summary>
+        public string? ServerCertificatePath { get; set; }
+
+        /// <summary>Optional application trust check, applied after built-in validation.</summary>
+        public Func<System.Security.Cryptography.X509Certificates.X509Certificate2, bool>? ServerCertificateValidator { get; set; }
+
         /// <summary>
-        /// Automatically trust the server certificate (skip validation callback). Default <c>true</c>.
-        /// Set to <c>false</c> in production and register a custom validation callback.
+        /// Skip built-in date, EKU and chain-integrity checks. Default <c>true</c>.
+        /// Built-in checks allow unknown roots and do not check CRLs, hostnames or application URIs.
+        /// ServerCertificateValidator, when supplied, always runs and can enforce application trust.
         /// </summary>
         public bool AutoAcceptServerCertificate { get; set; } = true;
 
@@ -172,6 +182,8 @@ namespace TinyUa.Client
             UserIdentity = UserIdentity.Clone(),
             Certificate = Certificate.Clone(),
             AutoDiscoverServerCertificate = AutoDiscoverServerCertificate,
+            ServerCertificatePath = ServerCertificatePath,
+            ServerCertificateValidator = ServerCertificateValidator,
             AutoAcceptServerCertificate = AutoAcceptServerCertificate
         };
     }
@@ -192,7 +204,8 @@ namespace TinyUa.Client
 
         /// <summary>
         /// Password (only used with <see cref="UserTokenType.UserName"/>).
-        /// Encrypted with RSA-OAEP using the server's certificate before transmission — never sent in cleartext.
+        /// Protection follows the server's user-token policy. A None token policy on a None
+        /// channel sends the password without encryption; use a secure endpoint for credentials.
         /// </summary>
         public string? Password { get; set; }
 
@@ -202,6 +215,9 @@ namespace TinyUa.Client
         /// <summary>X509 private key file path (only used with <see cref="UserTokenType.Certificate"/>).</summary>
         public string? PrivateKeyPath { get; set; }
 
+        /// <summary>Password for the X509 user identity PFX.</summary>
+        public string? PrivateKeyPassword { get; set; }
+
         /// <summary>Creates a copy of these user identity options.</summary>
         public UserIdentityOptions Clone() => new()
         {
@@ -209,7 +225,8 @@ namespace TinyUa.Client
             Username = Username,
             Password = Password,
             CertificatePath = CertificatePath,
-            PrivateKeyPath = PrivateKeyPath
+            PrivateKeyPath = PrivateKeyPath,
+            PrivateKeyPassword = PrivateKeyPassword
         };
     }
 

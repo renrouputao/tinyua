@@ -123,7 +123,7 @@ namespace TinyUa.Client.Services
                 ResponseHeader = ResponseHeader.Decode(decoder)
             };
 
-            var count = decoder.ReadArrayLength();
+            var count = decoder.ReadBoundedArrayLength(minimumElementSize: 4);
             if (count > 0)
             {
                 response.Results = new StatusCode[count];

@@ -97,7 +97,7 @@ namespace TinyUa.Client.Services
                 SecurityPolicyUri = decoder.ReadString()
             };
 
-            var tokenCount = decoder.ReadInt32();
+            var tokenCount = decoder.ReadArrayLength();
             if (tokenCount > 0)
             {
                 ep.UserIdentityTokens = new UserTokenPolicy[tokenCount];
@@ -190,7 +190,7 @@ namespace TinyUa.Client.Services
                 ("afterResponseHeader", decoder.Position),
                 ("remaining", decoder.Remaining));
 
-            var count = decoder.ReadInt32();
+            var count = decoder.ReadArrayLength();
             SecurityDebugLogger.LogStage("GetEndpointsResponse.Decode",
                 ("endpointCount", count),
                 ("afterCount", decoder.Position));

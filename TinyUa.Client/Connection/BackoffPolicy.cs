@@ -12,12 +12,14 @@ namespace TinyUa.Client.Connection
         private readonly int _initialDelayMs;
         private readonly int _maxDelayMs;
         private int _currentDelayMs;
+        private readonly bool _jitter;
 
-        internal BackoffPolicy(int initialDelayMs, int maxDelayMs)
+        internal BackoffPolicy(int initialDelayMs, int maxDelayMs, bool jitter = false)
         {
             _initialDelayMs = Math.Max(0, initialDelayMs);
             _maxDelayMs = Math.Max(_initialDelayMs, maxDelayMs);
             _currentDelayMs = _initialDelayMs;
+            _jitter = jitter;
         }
 
         /// <summary>Returns the delay to wait before the next attempt, then advances the progression.</summary>
@@ -25,7 +27,7 @@ namespace TinyUa.Client.Connection
         {
             var delay = _currentDelayMs;
             _currentDelayMs = (int)Math.Min((long)_currentDelayMs * 2, _maxDelayMs);
-            return delay;
+            return _jitter ? (int)(delay * (0.8 + Random.Shared.NextDouble() * 0.2)) : delay;
         }
 
         /// <summary>Resets the progression back to the initial delay (e.g. after a successful attempt).</summary>

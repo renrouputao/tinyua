@@ -17,7 +17,7 @@ namespace TinyUa.Core.Security
         SignAndEncrypt = 3
     }
 
-    internal abstract class SecurityPolicy
+    internal abstract class SecurityPolicy : IDisposable
     {
         public abstract string Uri { get; }
         public abstract int SignatureKeySize { get; }
@@ -38,6 +38,7 @@ namespace TinyUa.Core.Security
 
         public abstract void MakeLocalSymmetricKey(byte[]? secret, byte[]? seed);
         public abstract void MakeRemoteSymmetricKey(byte[]? secret, byte[]? seed);
+        public virtual void Dispose() { }
     }
 
     internal interface ICryptography
@@ -73,6 +74,7 @@ namespace TinyUa.Core.Security
 
         /// <summary>Attempts to encrypt a complete protocol payload in place.</summary>
         bool TryEncryptInPlace(byte[] data);
+        bool TryEncryptInPlace(Span<byte> data) => false;
         byte[] Decrypt(ReadOnlySpan<byte> data);
 
         /// <summary>
@@ -96,7 +98,8 @@ namespace TinyUa.Core.Security
         public byte[] Sign(ReadOnlySpan<byte> header, ReadOnlySpan<byte> securityHeader, ReadOnlySpan<byte> body) => Array.Empty<byte>();
         public bool VerifyData(byte[] data, ReadOnlySpan<byte> signature) => true;
         public void Verify(ReadOnlySpan<byte> header, ReadOnlySpan<byte> securityHeader,
-            ReadOnlySpan<byte> body, ReadOnlySpan<byte> signature) { }
+            ReadOnlySpan<byte> body, ReadOnlySpan<byte> signature)
+        { }
         public byte[] Encrypt(byte[] data) => data;
         public bool TryEncryptInPlace(byte[] data) => true;
         public byte[] Decrypt(ReadOnlySpan<byte> data) => data.ToArray();

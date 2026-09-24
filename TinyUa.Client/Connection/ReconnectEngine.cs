@@ -24,6 +24,7 @@ namespace TinyUa.Client.Connection
         private volatile bool _reconnecting;
         private CancellationTokenSource? _reconnectCts;
         private TaskCompletionSource<bool>? _pendingReconnect;
+        private bool _stopped;
 
         private NodeId? _lastSessionId;
         private NodeId? _lastAuthToken;
@@ -78,6 +79,11 @@ namespace TinyUa.Client.Connection
                 _subscriptionTemplates.RemoveAll(t => t.SubscriptionId == subscriptionId);
         }
 
+        internal void UnregisterSubscription(Subscription subscription)
+        {
+            lock (_lock) _subscriptionTemplates.RemoveAll(t => ReferenceEquals(t.ActiveSubscription, subscription));
+        }
+
         internal async Task<bool> ReconnectAsync(string endpointUrl, Func<SubscriptionTemplate, Task<Subscription?>> rebuildSubscription)
         {
             if (_options.ReconnectMaxRetries == 0)
@@ -87,34 +93,32 @@ namespace TinyUa.Client.Connection
             }
 
             Task<bool>? pendingTask = null;
+            CancellationTokenSource reconnectCts;
+            TaskCompletionSource<bool> completion;
             lock (_lock)
             {
-                if (_reconnecting && _pendingReconnect != null)
+                if (_stopped) return false;
+                if (_pendingReconnect != null)
                 {
                     pendingTask = _pendingReconnect.Task;
+                    reconnectCts = _reconnectCts!;
+                    completion = _pendingReconnect;
                 }
                 else
                 {
                     _reconnecting = true;
-                    _pendingReconnect = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    reconnectCts = _reconnectCts = new CancellationTokenSource();
+                    completion = _pendingReconnect = new(TaskCreationOptions.RunContinuationsAsynchronously);
                 }
             }
-
-            if (pendingTask != null)
-            {
-
-                return await pendingTask.ConfigureAwait(false);
-            }
-
-            var reconnectCts = new CancellationTokenSource();
-            lock (_lock)
-                _reconnectCts = reconnectCts;
+            if (pendingTask != null) return await pendingTask.ConfigureAwait(false);
+            var cancellationToken = reconnectCts.Token;
             using var loggerScope = SecurityDebugLogger.BeginScope(_logger);
             bool success = false;
             try
             {
                 var retries = 0;
-                var backoff = new BackoffPolicy(_options.ReconnectInitialDelayMs, _options.ReconnectMaxDelayMs);
+                var backoff = new BackoffPolicy(_options.ReconnectInitialDelayMs, _options.ReconnectMaxDelayMs, jitter: true);
 
                 while (_options.ReconnectMaxRetries < 0 || retries < _options.ReconnectMaxRetries)
                 {
@@ -124,16 +128,18 @@ namespace TinyUa.Client.Connection
                     try
                     {
 
-                        await ConnectTransportAsync(endpointUrl).ConfigureAwait(false);
+                        await ConnectTransportAsync(endpointUrl, cancellationToken).ConfigureAwait(false);
 
-                        bool sessionRecovered = await RecoverSessionAsync(endpointUrl).ConfigureAwait(false);
+                        bool sessionRecovered = await RecoverSessionAsync(endpointUrl, cancellationToken).ConfigureAwait(false);
 
-                        bool lossless = await RecoverSubscriptionsAsync(sessionRecovered, rebuildSubscription).ConfigureAwait(false);
+                        bool lossless = await RecoverSubscriptionsAsync(sessionRecovered, rebuildSubscription, cancellationToken).ConfigureAwait(false);
 
+                        cancellationToken.ThrowIfCancellationRequested();
                         ReconnectCompleted?.Invoke(lossless);
                         success = true;
                         return true;
                     }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
                     catch (Exception ex)
                     {
                         _logger.LogWarning(ex, $"Reconnect attempt {retries + 1} failed");
@@ -153,33 +159,35 @@ namespace TinyUa.Client.Connection
                     }
                 }
 
-                ReconnectFailed?.Invoke();
+                if (!cancellationToken.IsCancellationRequested) ReconnectFailed?.Invoke();
                 return false;
             }
             finally
             {
-                _reconnecting = false;
-                // Detach the field under the lock so CancelReconnect can never race the dispose:
-                // it either sees this CTS while we still hold it un-disposed, or sees null.
+                if (!success)
+                {
+                    // A cancelled handshake cannot carry graceful session-close traffic.
+                    // Close it before completing StopAsync so shutdown never waits on the peer.
+                    try { await _connection.DisconnectAsync().ConfigureAwait(false); } catch { }
+                }
                 lock (_lock)
                 {
-                    if (_reconnectCts == reconnectCts)
-                        _reconnectCts = null;
+                    _reconnecting = false;
+                    _reconnectCts = null;
+                    _pendingReconnect = null;
+                    completion.TrySetResult(success);
                 }
                 reconnectCts.Dispose();
-                var tcs = _pendingReconnect;
-                _pendingReconnect = null;
-                tcs?.TrySetResult(success);
             }
         }
 
-        private async Task ConnectTransportAsync(string endpointUrl)
+        private async Task ConnectTransportAsync(string endpointUrl, CancellationToken cancellationToken)
         {
             var uri = new Uri(endpointUrl);
             // Uri.Port is -1 when an opc.tcp URL omits its port. Initial connection
             // normalizes this to the OPC UA default (4840); reconnect must do the same.
-            await _connection.ConnectAsync(uri.Host, ResolvePort(uri)).ConfigureAwait(false);
-            await _connection.SendHelloAsync(endpointUrl, _options.MaxMessageSize).ConfigureAwait(false);
+            await _connection.ConnectAsync(uri.Host, ResolvePort(uri), cancellationToken).ConfigureAwait(false);
+            await _connection.SendHelloAsync(endpointUrl, _options.MaxMessageSize, cancellationToken).ConfigureAwait(false);
 
             var policy = _connection.SecurityPolicy;
             var nonce = new byte[policy.NonceLength];
@@ -192,27 +200,22 @@ namespace TinyUa.Client.Connection
                 SecurityMode = policy.SecurityMode,
                 ClientNonce = nonce.Length > 0 ? nonce : null,
                 RequestedLifetime = _options.ChannelLifetime
-            }).ConfigureAwait(false);
+            }, cancellationToken).ConfigureAwait(false);
         }
 
-        private async Task<bool> RecoverSessionAsync(string endpointUrl)
+        private async Task<bool> RecoverSessionAsync(string endpointUrl, CancellationToken cancellationToken)
         {
             bool sessionRecovered = false;
             if (_lastSessionId != null && _lastAuthToken != null)
             {
                 try
                 {
-                    UserIdentityToken? identity = null;
-                    if (_options.Security.UserIdentity.Type == UserTokenType.Anonymous)
-                    {
-                        identity = UserIdentityToken.Anonymous();
-                        identity.PolicyId = _connection.UserTokenPolicyId;
-                    }
-                    await _connection.ActivateSessionAsync(_lastSessionId, _lastAuthToken, identity).ConfigureAwait(false);
+                    var identity = _connection.BuildIdentity(_options.Security.UserIdentity, endpointUrl);
+                    await _connection.ActivateSessionAsync(_lastSessionId, _lastAuthToken, identity, cancellationToken).ConfigureAwait(false);
                     sessionRecovered = true;
                     _logger.LogInformation("Reconnect: Session reactivated successfully");
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
                     _logger.LogDebug(ex, "Reconnect: ActivateSession failed, will create new session");
                 }
@@ -222,12 +225,12 @@ namespace TinyUa.Client.Connection
             {
 
                 var createResponse = await _connection.CreateSessionAsync(endpointUrl, _options.ApplicationName,
-                    _options.ApplicationUri, _options.ProductUri, (uint)_options.SessionTimeout).ConfigureAwait(false);
+                    _options.ApplicationUri, _options.ProductUri, (uint)_options.SessionTimeout, cancellationToken).ConfigureAwait(false);
                 var identity = UserIdentityFactory.Build(
                     _options.Security.UserIdentity, createResponse, _connection.SecurityPolicy,
                     _connection.UserTokenPolicyId, endpointUrl);
                 _connection.UserTokenPolicyId = identity.PolicyId;
-                await _connection.ActivateSessionAsync(identity).ConfigureAwait(false);
+                await _connection.ActivateSessionAsync(identity, cancellationToken).ConfigureAwait(false);
                 _logger.LogInformation("Reconnect: New session created");
             }
 
@@ -237,7 +240,7 @@ namespace TinyUa.Client.Connection
             return sessionRecovered;
         }
 
-        private async Task<bool> RecoverSubscriptionsAsync(bool sessionRecovered, Func<SubscriptionTemplate, Task<Subscription?>> rebuildSubscription)
+        private async Task<bool> RecoverSubscriptionsAsync(bool sessionRecovered, Func<SubscriptionTemplate, Task<Subscription?>> rebuildSubscription, CancellationToken cancellationToken)
         {
             bool lossless = true;
             List<SubscriptionTemplate> templates;
@@ -249,14 +252,18 @@ namespace TinyUa.Client.Connection
 
                 foreach (var tpl in templates)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (tpl.ActiveSubscription?.IsSubscriptionDisposed == true) continue;
                     if (tpl.ActiveSubscription != null)
                         tpl.LastSequenceNumber = tpl.ActiveSubscription.LastSequenceNumber;
                 }
 
                 foreach (var tpl in templates)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (tpl.ActiveSubscription?.IsSubscriptionDisposed == true) continue;
                     var sub = tpl.ActiveSubscription;
-                    uint seq = tpl.LastSequenceNumber + 1;
+                    uint seq = tpl.LastSequenceNumber == uint.MaxValue ? 1 : tpl.LastSequenceNumber + 1;
                     int republishCount = 0;
                     const int maxRepublish = 1000;
 
@@ -264,7 +271,7 @@ namespace TinyUa.Client.Connection
                     {
                         try
                         {
-                            var msg = await _connection.RepublishAsync(tpl.SubscriptionId, seq).ConfigureAwait(false);
+                            var msg = await _connection.RepublishAsync(tpl.SubscriptionId, seq, cancellationToken).ConfigureAwait(false);
 
                             // Publishing is stopped during a connection loss, so gate on disposal,
                             // not on _running — otherwise every republished notification of a
@@ -274,16 +281,24 @@ namespace TinyUa.Client.Connection
                                 // Preserve the same bounded, serial dispatch path as live
                                 // Publish responses. Processing republished data inline used to
                                 // bypass backpressure and left LastSequenceNumber stale.
-                                await sub.EnqueueRepublishAsync(msg).ConfigureAwait(false);
+                                await sub.EnqueueRepublishAsync(msg, cancellationToken).ConfigureAwait(false);
                             }
 
                             tpl.LastSequenceNumber = seq;
-                            seq++;
+                            seq = seq == uint.MaxValue ? 1 : seq + 1;
                             republishCount++;
                         }
-                        catch (UaException ex) when (ex.StatusCode == 0x803B0000)
+                        catch (UaException ex) when (ex.StatusCode == 0x807B0000)
                         {
 
+                            break;
+                        }
+                        catch (UaException ex) when (ex.StatusCode == 0x80280000)
+                        {
+                            lossless = false;
+                            tpl.CancellationToken = cancellationToken;
+                            var rebuilt = await rebuildSubscription(tpl).ConfigureAwait(false);
+                            if (rebuilt != null) tpl.SubscriptionId = rebuilt.SubscriptionId;
                             break;
                         }
                         catch (Exception ex)
@@ -296,6 +311,7 @@ namespace TinyUa.Client.Connection
 
                     if (republishCount > 0)
                         _logger.LogDebug($"Reconnect: Republished {republishCount} notifications for sub {tpl.SubscriptionId}");
+                    if (republishCount == maxRepublish) lossless = false;
                 }
             }
             else if (templates.Count > 0)
@@ -304,8 +320,11 @@ namespace TinyUa.Client.Connection
                 lossless = false;
                 foreach (var tpl in templates)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (tpl.ActiveSubscription?.IsSubscriptionDisposed == true) continue;
                     try
                     {
+                        tpl.CancellationToken = cancellationToken;
                         var sub = await rebuildSubscription(tpl).ConfigureAwait(false);
                         if (sub != null)
                         {
@@ -316,6 +335,10 @@ namespace TinyUa.Client.Connection
                     catch (Exception ex)
                     {
                         _logger.LogWarning(ex, "Reconnect: Failed to rebuild subscription");
+                        // The next attempt must rebuild all remaining subscriptions again.
+                        _lastSessionId = null;
+                        _lastAuthToken = null;
+                        throw;
                     }
                 }
             }
@@ -333,8 +356,17 @@ namespace TinyUa.Client.Connection
         {
             lock (_lock)
             {
+                _stopped = true;
                 try { _reconnectCts?.Cancel(); } catch (ObjectDisposedException) { }
             }
+        }
+
+        internal async Task StopAsync()
+        {
+            CancelReconnect();
+            Task? pending;
+            lock (_lock) pending = _pendingReconnect?.Task;
+            if (pending != null) await pending.ConfigureAwait(false);
         }
 
         public void Dispose()
@@ -346,6 +378,7 @@ namespace TinyUa.Client.Connection
 
     internal class SubscriptionTemplate
     {
+        internal CancellationToken CancellationToken { get; set; }
         internal uint SubscriptionId { get; set; }
         internal uint LastSequenceNumber { get; set; }
         internal double PublishingInterval { get; set; } = 1000;

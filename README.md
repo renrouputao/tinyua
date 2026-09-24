@@ -302,6 +302,19 @@ await client.RunAsync();
 failure signals share one reconnect operation and do not produce duplicate
 `Reconnecting` state notifications.
 
+Concurrent `RunAsync` callers wait for the same handshake. Cancelling a secondary wait does
+not cancel the owner. Cancellation also reaches service calls and reconnect I/O; `StopAsync`
+cancels and joins an unfinished connection or recovery attempt.
+
+Read and Browse may retry once after a connection failure. **Write is never replayed
+automatically**: losing its response does not prove the server rejected the write. Returned
+monitored-item IDs are stable client handles and remain usable with `DeleteMonitoredItemsAsync`
+after subscription rebuilding.
+
+Endpoint selection requires an exact security-policy and security-mode match. To pin a server
+certificate, set `Security.ServerCertificateValidator`; the callback runs even when
+`AutoAcceptServerCertificate` is true. If discovery is disabled, provide `ServerCertificatePath`.
+
 ## Project Structure
 
 | Project | Type | Description |
@@ -347,7 +360,7 @@ var options = new UaClientOptions
     SessionKeepAliveIntervalMs = 0, // 0 = automatic idle heartbeat; negative = disabled
     ChannelLifetime = 3600000,    // secure channel lifetime in ms
     WarmupOnConnect = true,       // warm up the Read codec path after connecting
-    MaxMessageSize = 0,           // 0 = use server default
+    MaxMessageSize = 0,           // no advertised receive limit; internal safety caps still apply
 
     Security = new SecurityOptions
     {

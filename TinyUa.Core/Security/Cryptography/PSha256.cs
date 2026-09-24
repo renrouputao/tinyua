@@ -27,10 +27,13 @@ namespace TinyUa.Core.Security.Cryptography
                 int copy = Math.Min(t.Length, length - offset);
                 Buffer.BlockCopy(t, 0, result, offset, copy);
                 offset += copy;
-
-                a = hmac.ComputeHash(a);
+                CryptographicOperations.ZeroMemory(t);
+                var next = hmac.ComputeHash(a);
+                CryptographicOperations.ZeroMemory(a);
+                a = next;
             }
-
+            CryptographicOperations.ZeroMemory(a);
+            CryptographicOperations.ZeroMemory(input);
             return result;
         }
     }

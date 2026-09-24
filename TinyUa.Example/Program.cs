@@ -69,6 +69,7 @@ class Program
         }
         catch (Exception ex)
         {
+            Environment.ExitCode = 1;
             Console.WriteLine($"✗ FAILED: {ex.Message}");
             if (ex.InnerException != null)
                 Console.WriteLine($"  Inner: {ex.InnerException.Message}");
@@ -171,15 +172,17 @@ class Program
     static async Task Example_Aes256_Options(string url)
     {
         Console.WriteLine("── 3. Aes256_Sha256_RsaPss + Anonymous (explicit options) ──");
-        Console.WriteLine("     (RSA-PSS-SHA384 OPN, AES-256-CBC MSG, HMAC-SHA256)");
+        Console.WriteLine("     (RSA-PSS-SHA256 OPN, AES-256-CBC MSG, HMAC-SHA256)");
 
         var options = new UaClientOptions
         {
             ApplicationName = "TinyUa-Example-A256",
             Timeout = 15000,
+            ReconnectMaxRetries = 0,
             Security = new SecurityOptions
             {
                 Policy = "Aes256_Sha256_RsaPss",
+                Mode = TinyUa.Core.Security.MessageSecurityMode.SignAndEncrypt,
                 AutoAcceptServerCertificate = true,
                 Certificate = new CertificateOptions { AutoGenerate = true },
             },

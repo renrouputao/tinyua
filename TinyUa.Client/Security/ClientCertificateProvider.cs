@@ -25,8 +25,10 @@ namespace TinyUa.Client.Security
                 X509Certificate2 cert;
                 if (!string.IsNullOrEmpty(certOptions.PrivateKeyPath))
                 {
-                    (cert, _) = CertificateLoader.LoadCertificateWithKey(
+                    var loaded = CertificateLoader.LoadCertificateWithKey(
                         certOptions.CertificatePath!, certOptions.PrivateKeyPath!);
+                    cert = loaded.Certificate;
+                    loaded.PrivateKey.Dispose();
                 }
                 else
                 {
@@ -40,11 +42,12 @@ namespace TinyUa.Client.Security
             {
                 logger.LogDebug($"Auto-generating self-signed certificate " +
                     $"(CN={applicationName}, URI={applicationUri})...");
-                var (cert, _) = CertificateGenerator.CreateSelfSigned(
+                var (cert, key) = CertificateGenerator.CreateSelfSigned(
                     applicationName,
                     applicationUri,
                     certOptions.KeySize,
                     certOptions.ValidityYears);
+                using var ownedKey = key;
 
                 // Save to file if path is specified
                 if (!string.IsNullOrEmpty(certOptions.CertificatePath))
@@ -53,7 +56,8 @@ namespace TinyUa.Client.Security
                     var pfxBytes = string.IsNullOrEmpty(pfxPassword)
                         ? cert.Export(X509ContentType.Pfx)
                         : cert.Export(X509ContentType.Pfx, pfxPassword);
-                    File.WriteAllBytes(certOptions.CertificatePath, pfxBytes);
+                    try { File.WriteAllBytes(certOptions.CertificatePath, pfxBytes); }
+                    finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(pfxBytes); }
 
                     // Also save DER format for servers that don't accept PFX
                     var derPath = Path.ChangeExtension(certOptions.CertificatePath, ".der");

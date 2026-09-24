@@ -3,7 +3,7 @@ using TinyUa.Core.Logging;
 
 namespace TinyUa.Core.Security.Cryptography
 {
-    internal sealed class AesCryptography : ICryptography
+    internal sealed class AesCryptography : ICryptography, IDisposable
     {
         private readonly int _signatureKeySize;
         private readonly int _encryptionKeySize;
@@ -12,6 +12,20 @@ namespace TinyUa.Core.Security.Cryptography
 
         private byte[]? _localSigKey;
         private byte[]? _remoteSigKey;
+        private byte[]? _localSigKeyRetired;
+        private byte[]? _remoteSigKeyRetired;
+
+        public void Dispose()
+        {
+            _localCipher?.Dispose();
+            _remoteCipher?.Dispose();
+            _localCipherRetired?.Dispose();
+            _remoteCipherRetired?.Dispose();
+            if (_localSigKey != null) CryptographicOperations.ZeroMemory(_localSigKey);
+            if (_remoteSigKey != null) CryptographicOperations.ZeroMemory(_remoteSigKey);
+            if (_localSigKeyRetired != null) CryptographicOperations.ZeroMemory(_localSigKeyRetired);
+            if (_remoteSigKeyRetired != null) CryptographicOperations.ZeroMemory(_remoteSigKeyRetired);
+        }
 
         // (Aes, IV) pairs are swapped as one reference on rekey so a concurrent one-shot
         // Encrypt/Decrypt never observes a new key paired with an old IV. The previous instance
@@ -34,7 +48,7 @@ namespace TinyUa.Core.Security.Cryptography
                 Iv = iv;
             }
 
-            public void Dispose() => Aes.Dispose();
+            public void Dispose() { Aes.Dispose(); CryptographicOperations.ZeroMemory(Iv); }
         }
 
         internal AesCryptography(int signatureKeySize, int encryptionKeySize, int blockSize, MessageSecurityMode mode)
@@ -55,6 +69,8 @@ namespace TinyUa.Core.Security.Cryptography
         {
             int total = _signatureKeySize + _encryptionKeySize + _blockSize;
             var derived = PSha256.Derive(secret!, seed!, total);
+            if (_localSigKeyRetired != null) CryptographicOperations.ZeroMemory(_localSigKeyRetired);
+            _localSigKeyRetired = _localSigKey;
             _localSigKey = derived[.._signatureKeySize];
             var encKey = derived[_signatureKeySize..(_signatureKeySize + _encryptionKeySize)];
             var iv = derived[(_signatureKeySize + _encryptionKeySize)..];
@@ -69,16 +85,17 @@ namespace TinyUa.Core.Security.Cryptography
             SecurityDebugLogger.LogStage("AesCryptography.MakeLocalKeys",
                 ("secretLen", secret?.Length ?? -1),
                 ("seedLen", seed?.Length ?? -1),
-                ("sigKeyPrefix", Hex8(_localSigKey)),
-                ("encKeyPrefix", Hex8(encKey)),
-                ("ivPrefix", Hex8(iv)),
                 ("isEncrypted", _isEncrypted));
+            CryptographicOperations.ZeroMemory(derived);
+            CryptographicOperations.ZeroMemory(encKey);
         }
 
         internal void MakeRemoteKeys(byte[]? secret, byte[]? seed)
         {
             int total = _signatureKeySize + _encryptionKeySize + _blockSize;
             var derived = PSha256.Derive(secret!, seed!, total);
+            if (_remoteSigKeyRetired != null) CryptographicOperations.ZeroMemory(_remoteSigKeyRetired);
+            _remoteSigKeyRetired = _remoteSigKey;
             _remoteSigKey = derived[.._signatureKeySize];
             var encKey = derived[_signatureKeySize..(_signatureKeySize + _encryptionKeySize)];
             var iv = derived[(_signatureKeySize + _encryptionKeySize)..];
@@ -93,19 +110,9 @@ namespace TinyUa.Core.Security.Cryptography
             SecurityDebugLogger.LogStage("AesCryptography.MakeRemoteKeys",
                 ("secretLen", secret?.Length ?? -1),
                 ("seedLen", seed?.Length ?? -1),
-                ("sigKeyPrefix", Hex8(_remoteSigKey)),
-                ("encKeyPrefix", Hex8(encKey)),
-                ("ivPrefix", Hex8(iv)),
                 ("isEncrypted", _isEncrypted));
-        }
-
-        private static string Hex8(byte[]? key)
-        {
-            if (key == null || key.Length == 0) return "(null)";
-            int len = System.Math.Min(8, key.Length);
-            var hex = new System.Text.StringBuilder(len * 2);
-            for (int i = 0; i < len; i++) hex.Append(key[i].ToString("X2"));
-            return hex.ToString();
+            CryptographicOperations.ZeroMemory(derived);
+            CryptographicOperations.ZeroMemory(encKey);
         }
 
         public byte[] Padding(int dataSize)
@@ -194,6 +201,9 @@ namespace TinyUa.Core.Security.Cryptography
         }
 
         public bool TryEncryptInPlace(byte[] data)
+            => TryEncryptInPlace(data.AsSpan());
+
+        public bool TryEncryptInPlace(Span<byte> data)
         {
             if (!_isEncrypted)
                 return true;

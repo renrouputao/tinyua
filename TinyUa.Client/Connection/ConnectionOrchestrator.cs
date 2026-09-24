@@ -48,130 +48,147 @@ namespace TinyUa.Client.Connection
             _logger.LogDebug("Connect stage: client certificate");
 
             X509Certificate2? localCert = null;
-            if (isSecure)
-            {
-                string? certUri;
-                (localCert, certUri) = ClientCertificateProvider.LoadOrGenerate(
-                    security.Certificate, _options.ApplicationName, _options.ApplicationUri, _logger);
-
-                // Sync ApplicationUri to the loaded certificate's URI SAN — the server rejects an
-                // ActivateSession whose ApplicationUri differs from the certificate. The write
-                // targets the client's private options snapshot, not the caller's object.
-                if (certUri != null && _options.ApplicationUri != certUri)
-                {
-                    _logger.LogDebug($"Syncing ApplicationUri to cert URI: {certUri}");
-                    _options.ApplicationUri = certUri;
-                }
-
-                _logger.LogDebug($"Client certificate: {(localCert?.Thumbprint ?? "null")}");
-            }
-
             X509Certificate2? remoteCert = null;
-            var resolvedMode = security.Mode;
-            string? userTokenPolicyId = null;
-            EndpointDescription? selected = null;
-
-            if (isSecure && security.AutoDiscoverServerCertificate)
+            try
             {
-                _logger.LogDebug("Connect stage: endpoint discovery");
-                _logger.LogDebug("Discovering server endpoints via GetEndpoints (None policy)...");
-                var endpoints = await DiscoverEndpointsAsync(host, port, endpointUrl, cancellationToken).ConfigureAwait(false);
-                SecurityDebugLogger.LogStage("Connect.GetEndpoints",
-                    ("endpointCount", endpoints?.Length ?? 0),
-                    ("requestedPolicy", security.Policy),
-                    ("requestedMode", security.Mode));
-                selected = SelectEndpoint(endpoints, security.Policy, security.Mode);
-                if (selected == null)
-                    throw new UaException(0x80000000,
-                        $"No server endpoint matches policy '{security.Policy}' with mode '{security.Mode}'.");
-
-                remoteCert = selected.ServerCertificateObject;
-                resolvedMode = selected.SecurityMode;
-                SecurityDebugLogger.LogStage("Connect.SelectEndpoint",
-                    ("endpointUrl", selected.EndpointUrl),
-                    ("securityMode", resolvedMode),
-                    ("securityPolicyUri", selected.SecurityPolicyUri),
-                    ("serverCertThumbprint", remoteCert?.Thumbprint),
-                    ("securityLevel", selected.SecurityLevel));
-
-                // Validate the discovered server certificate unless the caller opted into
-                // auto-trust. Without this, AutoAcceptServerCertificate=false had no effect.
-                if (!security.AutoAcceptServerCertificate)
+                if (isSecure)
                 {
-                    var validator = new CertificateValidator();
-                    try
+                    string? certUri;
+                    (localCert, certUri) = ClientCertificateProvider.LoadOrGenerate(
+                        security.Certificate, _options.ApplicationName, _options.ApplicationUri, _logger);
+
+                    // Sync ApplicationUri to the loaded certificate's URI SAN — the server rejects an
+                    // ActivateSession whose ApplicationUri differs from the certificate. The write
+                    // targets the client's private options snapshot, not the caller's object.
+                    if (certUri != null && _options.ApplicationUri != certUri)
                     {
-                        validator.Validate(remoteCert, isServerCertificate: true);
+                        _logger.LogDebug($"Syncing ApplicationUri to cert URI: {certUri}");
+                        _options.ApplicationUri = certUri;
                     }
-                    catch (Exception ex)
+
+                    _logger.LogDebug($"Client certificate: {(localCert?.Thumbprint ?? "null")}");
+                }
+
+                var resolvedMode = security.Mode;
+                string? userTokenPolicyId = null;
+                EndpointDescription? selected = null;
+
+                if (isSecure && security.AutoDiscoverServerCertificate)
+                {
+                    _logger.LogDebug("Connect stage: endpoint discovery");
+                    _logger.LogDebug("Discovering server endpoints via GetEndpoints (None policy)...");
+                    var endpoints = await DiscoverEndpointsAsync(host, port, endpointUrl, cancellationToken).ConfigureAwait(false);
+                    SecurityDebugLogger.LogStage("Connect.GetEndpoints",
+                        ("endpointCount", endpoints?.Length ?? 0),
+                        ("requestedPolicy", security.Policy),
+                        ("requestedMode", security.Mode));
+                    selected = SelectEndpoint(endpoints, security.Policy, security.Mode);
+                    if (selected == null)
+                        throw new UaException(0x80000000,
+                            $"No server endpoint matches policy '{security.Policy}' with mode '{security.Mode}'.");
+
+                    remoteCert = selected.ServerCertificateObject;
+                    resolvedMode = selected.SecurityMode;
+                    SecurityDebugLogger.LogStage("Connect.SelectEndpoint",
+                        ("endpointUrl", selected.EndpointUrl),
+                        ("securityMode", resolvedMode),
+                        ("securityPolicyUri", selected.SecurityPolicyUri),
+                        ("serverCertThumbprint", remoteCert?.Thumbprint),
+                        ("securityLevel", selected.SecurityLevel));
+
+                    // Validate the discovered server certificate unless the caller opted into
+                    // auto-trust. Without this, AutoAcceptServerCertificate=false had no effect.
+                    if (!security.AutoAcceptServerCertificate)
                     {
-                        throw new UaException(0x80120000,
-                            $"Server certificate validation failed: {ex.Message}");
+                        var validator = new CertificateValidator();
+                        try
+                        {
+                            validator.Validate(remoteCert, isServerCertificate: true);
+                        }
+                        catch (Exception ex)
+                        {
+                            throw new UaException(0x80120000,
+                                $"Server certificate validation failed: {ex.Message}");
+                        }
+                    }
+
+                    // All identity types, including Anonymous, use the server's advertised PolicyId.
+                    if (selected.UserIdentityTokens != null)
+                    {
+                        var tokenPolicy = selected.UserIdentityTokens
+                            .FirstOrDefault(t => t.TokenType == security.UserIdentity.Type);
+                        userTokenPolicyId = tokenPolicy?.PolicyId;
                     }
                 }
 
-                // All identity types, including Anonymous, use the server's advertised PolicyId.
-                if (selected.UserIdentityTokens != null)
+                _connection.UserTokenPolicyId = userTokenPolicyId;
+
+                if (isSecure && !security.AutoDiscoverServerCertificate)
                 {
-                    var tokenPolicy = selected.UserIdentityTokens
-                        .FirstOrDefault(t => t.TokenType == security.UserIdentity.Type);
-                    userTokenPolicyId = tokenPolicy?.PolicyId;
+                    if (string.IsNullOrEmpty(security.ServerCertificatePath))
+                        throw new InvalidOperationException("ServerCertificatePath is required when certificate discovery is disabled.");
+                    remoteCert = CertificateLoader.LoadCertificate(security.ServerCertificatePath);
+                    if (!security.AutoAcceptServerCertificate)
+                        new CertificateValidator().Validate(remoteCert, isServerCertificate: true);
                 }
+                if (remoteCert != null && security.ServerCertificateValidator != null
+                    && !security.ServerCertificateValidator(remoteCert))
+                    throw new CryptographicException("Application rejected the server certificate.");
+
+                var policy = SecurityPolicyFactory.Create(security.Policy, localCert, remoteCert, resolvedMode);
+                _connection.SetSecurityPolicy(policy);
+
+                // Use discovered endpoint URL if available, otherwise user-provided
+                var effectiveUrl = selected?.EndpointUrl ?? endpointUrl;
+
+                _logger.LogDebug("Connect stage: TCP");
+                await _connection.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
+                _logger.LogDebug("Connect stage: Hello");
+                await _connection.SendHelloAsync(effectiveUrl, _options.MaxMessageSize, cancellationToken).ConfigureAwait(false);
+
+                var clientNonce = new byte[policy.NonceLength];
+                if (clientNonce.Length > 0)
+                    RandomNumberGenerator.Fill(clientNonce);
+
+                _logger.LogDebug("Connect stage: OpenSecureChannel");
+                await _connection.OpenSecureChannelAsync(new OpenSecureChannelParameters
+                {
+                    RequestType = SecurityTokenRequestType.Issue,
+                    SecurityMode = resolvedMode,
+                    ClientNonce = clientNonce.Length > 0 ? clientNonce : null,
+                    RequestedLifetime = _options.ChannelLifetime
+                }, cancellationToken).ConfigureAwait(false);
+
+                _logger.LogDebug("Connect stage: CreateSession");
+                var createResponse = await _connection.CreateSessionAsync(effectiveUrl, _options.ApplicationName,
+                    _options.ApplicationUri, _options.ProductUri, (uint)_options.SessionTimeout, cancellationToken).ConfigureAwait(false);
+
+                SecurityDebugLogger.LogStage("Connect.CreateSession",
+                    ("sessionId", createResponse.SessionId),
+                    ("serverNonceLen", createResponse.ServerNonce?.Length ?? -1),
+                    ("serverCertLen", createResponse.ServerCertificate?.Length ?? -1),
+                    ("serverSignatureAlg", createResponse.ServerSignature?.Algorithm),
+                    ("endpointsCount", createResponse.ServerEndpoints?.Length ?? 0));
+
+                _logger.LogDebug("Connect stage: user identity policy");
+                var identity = UserIdentityFactory.Build(security.UserIdentity, createResponse, policy, userTokenPolicyId, effectiveUrl);
+                _connection.UserTokenPolicyId = identity.PolicyId;
+                _logger.LogDebug($"Activating session: identity={identity.TokenType}, policyId={identity.PolicyId}, tokenSecurityPolicy={identity.SecurityPolicyUri}");
+                _logger.LogDebug("Connect stage: ActivateSession");
+                await _connection.ActivateSessionAsync(identity, cancellationToken).ConfigureAwait(false);
             }
-
-            _connection.UserTokenPolicyId = userTokenPolicyId;
-
-            var policy = SecurityPolicyFactory.Create(security.Policy, localCert, remoteCert, resolvedMode);
-            _connection.SetSecurityPolicy(policy);
-
-            // Use discovered endpoint URL if available, otherwise user-provided
-            var effectiveUrl = selected?.EndpointUrl ?? endpointUrl;
-
-            _logger.LogDebug("Connect stage: TCP");
-            await _connection.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
-            _logger.LogDebug("Connect stage: Hello");
-            await _connection.SendHelloAsync(effectiveUrl, _options.MaxMessageSize, cancellationToken).ConfigureAwait(false);
-
-            var clientNonce = new byte[policy.NonceLength];
-            if (clientNonce.Length > 0)
-                RandomNumberGenerator.Fill(clientNonce);
-
-            _logger.LogDebug("Connect stage: OpenSecureChannel");
-            await _connection.OpenSecureChannelAsync(new OpenSecureChannelParameters
-            {
-                RequestType = SecurityTokenRequestType.Issue,
-                SecurityMode = resolvedMode,
-                ClientNonce = clientNonce.Length > 0 ? clientNonce : null,
-                RequestedLifetime = _options.ChannelLifetime
-            }, cancellationToken).ConfigureAwait(false);
-
-            _logger.LogDebug("Connect stage: CreateSession");
-            var createResponse = await _connection.CreateSessionAsync(effectiveUrl, _options.ApplicationName,
-                _options.ApplicationUri, _options.ProductUri, (uint)_options.SessionTimeout, cancellationToken).ConfigureAwait(false);
-
-            SecurityDebugLogger.LogStage("Connect.CreateSession",
-                ("sessionId", createResponse.SessionId),
-                ("serverNonceLen", createResponse.ServerNonce?.Length ?? -1),
-                ("serverCertLen", createResponse.ServerCertificate?.Length ?? -1),
-                ("serverSignatureAlg", createResponse.ServerSignature?.Algorithm),
-                ("endpointsCount", createResponse.ServerEndpoints?.Length ?? 0));
-
-            _logger.LogDebug("Connect stage: user identity policy");
-            var identity = UserIdentityFactory.Build(security.UserIdentity, createResponse, policy, userTokenPolicyId, effectiveUrl);
-            _connection.UserTokenPolicyId = identity.PolicyId;
-            _logger.LogDebug($"Activating session: identity={identity.TokenType}, policyId={identity.PolicyId}, tokenSecurityPolicy={identity.SecurityPolicyUri}");
-            _logger.LogDebug("Connect stage: ActivateSession");
-            await _connection.ActivateSessionAsync(identity, cancellationToken).ConfigureAwait(false);
+            finally { localCert?.Dispose(); remoteCert?.Dispose(); }
         }
 
         private async Task<EndpointDescription[]?> DiscoverEndpointsAsync(
             string host, int port, string endpointUrl, CancellationToken cancellationToken)
         {
-            await _connection.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
+            using var discovery = new UaConnection((int)_options.Timeout, _logger);
+            await discovery.ConnectAsync(host, port, cancellationToken).ConfigureAwait(false);
             try
             {
-                await _connection.SendHelloAsync(endpointUrl, _options.MaxMessageSize, cancellationToken).ConfigureAwait(false);
-                await _connection.OpenSecureChannelAsync(new OpenSecureChannelParameters
+                await discovery.SendHelloAsync(endpointUrl, _options.MaxMessageSize, cancellationToken).ConfigureAwait(false);
+                await discovery.OpenSecureChannelAsync(new OpenSecureChannelParameters
                 {
                     RequestType = SecurityTokenRequestType.Issue,
                     SecurityMode = MessageSecurityMode.None,
@@ -179,7 +196,7 @@ namespace TinyUa.Client.Connection
                     RequestedLifetime = 60000
                 }, cancellationToken).ConfigureAwait(false);
 
-                return await _connection.GetEndpointsAsync(endpointUrl, cancellationToken).ConfigureAwait(false);
+                return await discovery.GetEndpointsAsync(endpointUrl, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -188,18 +205,17 @@ namespace TinyUa.Client.Connection
                 try
                 {
                     if (!cancellationToken.IsCancellationRequested)
-                        await _connection.CloseSecureChannelAsync().ConfigureAwait(false);
+                        await discovery.CloseSecureChannelAsync().ConfigureAwait(false);
                 }
                 finally
                 {
-                    await _connection.DisconnectAsync().ConfigureAwait(false);
+                    await discovery.DisconnectAsync().ConfigureAwait(false);
                 }
             }
         }
 
         /// <summary>
-        /// Picks the best endpoint matching the requested policy: prefer the highest-security-level
-        /// endpoint matching policy AND mode, falling back to the best policy-only match.
+        /// Picks the highest-security-level endpoint matching both policy and mode.
         /// </summary>
         internal static EndpointDescription? SelectEndpoint(
             EndpointDescription[]? endpoints, string policyName, MessageSecurityMode mode)
@@ -208,24 +224,19 @@ namespace TinyUa.Client.Connection
                 return null;
 
             var policyUri = SecurityPolicyFactory.NormalizePolicyUri(policyName);
-            var suffix = policyUri.Substring(policyUri.LastIndexOf('#'));
-
             EndpointDescription? bestExact = null;
-            EndpointDescription? bestPolicyOnly = null;
             foreach (var ep in endpoints)
             {
                 if (ep.SecurityPolicyUri == null
-                    || !ep.SecurityPolicyUri.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                    || !string.Equals(ep.SecurityPolicyUri, policyUri, StringComparison.Ordinal))
                     continue;
 
-                if (bestPolicyOnly == null || ep.SecurityLevel > bestPolicyOnly.SecurityLevel)
-                    bestPolicyOnly = ep;
                 if (ep.SecurityMode == mode
                     && (bestExact == null || ep.SecurityLevel > bestExact.SecurityLevel))
                     bestExact = ep;
             }
 
-            return bestExact ?? bestPolicyOnly;
+            return bestExact;
         }
     }
 }

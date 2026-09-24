@@ -35,9 +35,9 @@ namespace TinyUa.Client.Subscriptions
 
     internal static class SubscriptionManager
     {
-        internal static async Task<Subscription> CreateSubscriptionAsync(SubscriptionRouter router, double publishingInterval = 1000.0, bool autoStart = true, int maxPublishRequests = 2, ILogger? logger = null, SubscriptionDispatchOptions? dispatchOptions = null)
+        internal static async Task<Subscription> CreateSubscriptionAsync(SubscriptionRouter router, double publishingInterval = 1000.0, bool autoStart = true, int maxPublishRequests = 2, ILogger? logger = null, SubscriptionDispatchOptions? dispatchOptions = null, CancellationToken cancellationToken = default)
         {
-            var result = await router.CreateSubscriptionAsync(publishingInterval).ConfigureAwait(false);
+            var result = await router.CreateSubscriptionAsync(publishingInterval, cancellationToken: cancellationToken).ConfigureAwait(false);
             var subscription = new Subscription(
                 router,
                 result.SubscriptionId,
@@ -62,6 +62,8 @@ namespace TinyUa.Client.Subscriptions
     public class MonitoredItem
     {
         internal uint MonitoredItemId { get; set; }
+        internal uint ServerMonitoredItemId { get; set; }
+        internal uint QueueSize { get; set; }
         internal uint ClientHandle { get; set; }
         internal NodeId NodeId { get; set; } = new NodeId();
         internal double SamplingInterval { get; set; }
@@ -77,10 +79,10 @@ namespace TinyUa.Client.Subscriptions
     /// <see cref="PublishEngine"/>; StartPublishing/StopPublishing attach and detach this
     /// subscription from that engine. Call <see cref="Dispose"/> to release resources.
     /// </summary>
-    public class Subscription : IDisposable
+    public partial class Subscription : IDisposable
     {
-        private readonly SubscriptionRouter _router;
-        private readonly ILogger? _logger;
+        private readonly SubscriptionRouter _router = null!;
+        private readonly ILogger _logger;
         private readonly object _lock = new();
         private readonly int _maxPublishRequests;
         private readonly SubscriptionDispatchOptions _dispatchOptions;
@@ -90,17 +92,23 @@ namespace TinyUa.Client.Subscriptions
         private readonly Task _dispatchWorker;
         private int _isDisposed;
         private int _dispatchStopped;
+        private int _generation;
+        private int _deleteSent;
         internal volatile bool _running;
+        internal event Action<Subscription>? Disposed;
+        private readonly SemaphoreSlim _mutationLock = new(1, 1);
+        private readonly HashSet<uint> _acknowledgements = new();
+        private readonly HashSet<uint> _acknowledgementsInFlight = new();
         private volatile uint _lastSequenceNumber;
         private int _publishCount;
         private int _notificationCount;
         private int _pendingNotificationMessages;
         private long _droppedNotificationMessages;
 
-        internal uint SubscriptionId { get; }
-        internal double PublishingInterval { get; }
-        internal uint LifetimeCount { get; }
-        internal uint MaxKeepAliveCount { get; }
+        internal uint SubscriptionId { get; private set; }
+        internal double PublishingInterval { get; private set; }
+        internal uint LifetimeCount { get; private set; }
+        internal uint MaxKeepAliveCount { get; private set; }
         internal Dictionary<uint, MonitoredItem> MonitoredItems { get; } = new();
         private int _nextClientHandle = 0;
 
@@ -128,7 +136,7 @@ namespace TinyUa.Client.Subscriptions
             int maxPublishRequests = 2, ILogger? logger = null, SubscriptionDispatchOptions? dispatchOptions = null)
         {
             _router = router;
-            _logger = logger;
+            _logger = logger ?? NullLogger.Instance;
             SubscriptionId = subscriptionId;
             PublishingInterval = publishingInterval;
             LifetimeCount = lifetimeCount;
@@ -158,7 +166,7 @@ namespace TinyUa.Client.Subscriptions
         /// </summary>
         internal async Task EnqueuePublishResponseAsync(PublishResponse response)
         {
-            await EnqueueDispatchAsync(new DispatchItem(response)).ConfigureAwait(false);
+            await EnqueueDispatchAsync(new DispatchItem(response) { Generation = Volatile.Read(ref _generation) }).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -166,21 +174,22 @@ namespace TinyUa.Client.Subscriptions
         /// after its sequence number and callback processing have finished. Reconnect therefore
         /// keeps the same acknowledgement and backpressure semantics as live publishing.
         /// </summary>
-        internal async Task EnqueueRepublishAsync(NotificationMessage message)
+        internal async Task EnqueueRepublishAsync(NotificationMessage message, CancellationToken cancellationToken = default)
         {
             var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            await EnqueueDispatchAsync(new DispatchItem(message, completion)).ConfigureAwait(false);
+            await EnqueueDispatchAsync(new DispatchItem(message, completion) { Generation = Volatile.Read(ref _generation) }, cancellationToken).ConfigureAwait(false);
             try
             {
-                await completion.Task.WaitAsync(_dispatchCancellation.Token).ConfigureAwait(false);
+                await completion.Task.WaitAsync(_dispatchCancellation.Token).WaitAsync(cancellationToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (_dispatchCancellation.IsCancellationRequested)
             {
             }
         }
 
-        private async Task EnqueueDispatchAsync(DispatchItem item)
+        private async Task EnqueueDispatchAsync(DispatchItem item, CancellationToken cancellationToken = default)
         {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(_dispatchCancellation.Token, cancellationToken);
             if (IsSubscriptionDisposed || Volatile.Read(ref _dispatchStopped) != 0)
             {
                 item.Cancel();
@@ -189,7 +198,7 @@ namespace TinyUa.Client.Subscriptions
 
             try
             {
-                await _enqueueLock.WaitAsync(_dispatchCancellation.Token).ConfigureAwait(false);
+                await _enqueueLock.WaitAsync(linked.Token).ConfigureAwait(false);
                 try
                 {
                     if (IsSubscriptionDisposed || Volatile.Read(ref _dispatchStopped) != 0)
@@ -207,7 +216,7 @@ namespace TinyUa.Client.Subscriptions
                     switch (_dispatchOptions.OverflowPolicy)
                     {
                         case NotificationOverflowPolicy.Wait:
-                            await _dispatchQueue.Writer.WriteAsync(item, _dispatchCancellation.Token).ConfigureAwait(false);
+                            await _dispatchQueue.Writer.WriteAsync(item, linked.Token).ConfigureAwait(false);
                             Interlocked.Increment(ref _pendingNotificationMessages);
                             return;
 
@@ -257,12 +266,12 @@ namespace TinyUa.Client.Subscriptions
                     Interlocked.Decrement(ref _pendingNotificationMessages);
                     try
                     {
-                        if (!IsSubscriptionDisposed)
+                        if (!IsSubscriptionDisposed && item.Generation == Volatile.Read(ref _generation))
                         {
                             if (item.PublishResponse != null)
-                                HandlePublishResponse(item.PublishResponse);
+                                HandlePublishResponse(item.PublishResponse, item.Generation);
                             else if (item.RepublishedMessage != null)
-                                HandleRepublishedNotification(item.RepublishedMessage);
+                                HandleRepublishedNotification(item.RepublishedMessage, item.Generation);
                         }
                     }
                     finally
@@ -284,15 +293,18 @@ namespace TinyUa.Client.Subscriptions
         private void RecordDroppedItem(DispatchItem item)
         {
             Interlocked.Increment(ref _droppedNotificationMessages);
-            AdvanceLastSequenceNumber(item.SequenceNumber);
+            if (item.HasNotifications) AdvanceLastSequenceNumber(item.SequenceNumber, item.Generation);
             _logger?.LogWarning($"Subscription {SubscriptionId}: notification dispatch queue is full; dropped PublishResponse seq={_lastSequenceNumber} ({_dispatchOptions.OverflowPolicy})");
             item.Cancel();
         }
 
-        private void AdvanceLastSequenceNumber(uint sequenceNumber)
+        private void AdvanceLastSequenceNumber(uint sequenceNumber, int? generation = null)
         {
             lock (_lock)
             {
+                if (generation.HasValue && generation.Value != _generation) return;
+                if (sequenceNumber == 0) return;
+                _acknowledgements.Add(sequenceNumber);
                 var current = _lastSequenceNumber;
                 // OPC UA sequence numbers are unsigned and may wrap. A delta below half the
                 // uint range is newer; this also prevents an older queued response from moving
@@ -311,71 +323,18 @@ namespace TinyUa.Client.Subscriptions
             _dispatchCancellation.Cancel();
         }
 
-        internal async Task<MonitoredItem> AddMonitoredItemAsync(NodeId nodeId, DataChangeHandler? handler = null, uint queueSize = 0)
-        {
-            return await AddMonitoredItemAsync(nodeId, PublishingInterval, handler, queueSize).ConfigureAwait(false);
-        }
+        internal async Task<MonitoredItem> AddMonitoredItemAsync(NodeId nodeId, DataChangeHandler? handler = null,
+            uint queueSize = 0, CancellationToken cancellationToken = default)
+            => await AddMonitoredItemAsync(nodeId, PublishingInterval, handler, queueSize, null, cancellationToken).ConfigureAwait(false);
 
-        internal async Task<MonitoredItem> AddMonitoredItemAsync(NodeId nodeId, double samplingInterval, DataChangeHandler? handler = null, uint queueSize = 0, DataChangeHandlerEx? handlerEx = null)
-        {
-            var clientHandle = (uint)Interlocked.Increment(ref _nextClientHandle);
-            var results = await _router.CreateMonitoredItemsAsync(SubscriptionId, new[] { nodeId }, AttributeId.Value, samplingInterval, new[] { clientHandle }, queueSize).ConfigureAwait(false);
+        internal async Task<MonitoredItem> AddMonitoredItemAsync(NodeId nodeId, double samplingInterval,
+            DataChangeHandler? handler = null, uint queueSize = 0, DataChangeHandlerEx? handlerEx = null,
+            CancellationToken cancellationToken = default)
+            => (await AddBatchAsync(new[] { nodeId }, samplingInterval, handler, queueSize, handlerEx, cancellationToken).ConfigureAwait(false))[0];
 
-            if (results == null || results.Length == 0)
-                throw new InvalidOperationException("Failed to create monitored item");
-
-            var result = results[0];
-            result.StatusCode.Check();
-
-            var item = new MonitoredItem
-            {
-                MonitoredItemId = result.MonitoredItemId,
-                ClientHandle = clientHandle,
-                NodeId = nodeId,
-                SamplingInterval = samplingInterval
-            };
-
-            if (handler != null)
-                item.OnDataChange = handler;
-            if (handlerEx != null)
-                item.OnDataChangeEx = handlerEx;
-
-            lock (_lock)
-                MonitoredItems[clientHandle] = item;
-
-            return item;
-        }
-
-        internal async Task AddMonitoredItemsAsync(NodeId[] nodeIds, DataChangeHandler? handler = null, uint queueSize = 0)
-        {
-            var clientHandles = new uint[nodeIds.Length];
-            for (int i = 0; i < nodeIds.Length; i++)
-                clientHandles[i] = (uint)Interlocked.Increment(ref _nextClientHandle);
-
-            var results = await _router.CreateMonitoredItemsAsync(SubscriptionId, nodeIds, AttributeId.Value, PublishingInterval, clientHandles, queueSize).ConfigureAwait(false);
-
-            if (results == null)
-                throw new InvalidOperationException("Failed to create monitored items");
-
-            for (int i = 0; i < results.Length; i++)
-            {
-                var result = results[i];
-                result.StatusCode.Check();
-
-                var item = new MonitoredItem
-                {
-                    MonitoredItemId = result.MonitoredItemId,
-                    ClientHandle = clientHandles[i],
-                    NodeId = nodeIds[i]
-                };
-
-                if (handler != null)
-                    item.OnDataChange = handler;
-
-                lock (_lock)
-                    MonitoredItems[clientHandles[i]] = item;
-            }
-        }
+        internal Task AddMonitoredItemsAsync(NodeId[] nodeIds, DataChangeHandler? handler = null, uint queueSize = 0,
+            CancellationToken cancellationToken = default)
+            => AddBatchAsync(nodeIds, PublishingInterval, handler, queueSize, null, cancellationToken);
 
         /// <summary>Attaches this subscription to the session publish engine. Idempotent.</summary>
         internal void StartPublishing()
@@ -405,7 +364,7 @@ namespace TinyUa.Client.Subscriptions
         /// number, dispatches notifications or the keep-alive event, and surfaces processing
         /// errors via <see cref="OnPublishError"/>.
         /// </summary>
-        internal void HandlePublishResponse(PublishResponse response)
+        internal void HandlePublishResponse(PublishResponse response, int? generation = null)
         {
             Interlocked.Increment(ref _publishCount);
             try
@@ -413,7 +372,7 @@ namespace TinyUa.Client.Subscriptions
                 response.ResponseHeader.ServiceResult.Check();
 
                 var notificationMsg = response.Parameters.NotificationMessage;
-                AdvanceLastSequenceNumber(notificationMsg.SequenceNumber);
+                if (notificationMsg.NotificationData.Count > 0) AdvanceLastSequenceNumber(notificationMsg.SequenceNumber, generation);
 
                 if (notificationMsg.NotificationData.Count > 0)
                 {
@@ -428,15 +387,15 @@ namespace TinyUa.Client.Subscriptions
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, $"Subscription {SubscriptionId}: error processing PublishResponse");
-                OnPublishError?.Invoke(ex);
+                RaisePublishError(ex);
             }
         }
 
-        private void HandleRepublishedNotification(NotificationMessage message)
+        private void HandleRepublishedNotification(NotificationMessage message, int? generation = null)
         {
             try
             {
-                AdvanceLastSequenceNumber(message.SequenceNumber);
+                if (message.NotificationData.Count > 0) AdvanceLastSequenceNumber(message.SequenceNumber, generation);
                 if (message.NotificationData.Count > 0)
                     ProcessNotification(message);
                 else
@@ -445,7 +404,7 @@ namespace TinyUa.Client.Subscriptions
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, $"Subscription {SubscriptionId}: error processing republished notification");
-                OnPublishError?.Invoke(ex);
+                RaisePublishError(ex);
             }
         }
 
@@ -454,6 +413,13 @@ namespace TinyUa.Client.Subscriptions
             foreach (var data in message.NotificationData)
             {
                 if (data.Body == null || data.Body.Length == 0) continue;
+
+                if (data.TypeId == null || !data.TypeId.Equals(new NodeId(811u)))
+                {
+                    if (data.TypeId?.Equals(new NodeId(820u)) == true)
+                        new StatusCode(new BinaryDecoder(data.Body).ReadUInt32()).Check();
+                    continue;
+                }
 
                 var decoder = new BinaryDecoder(data.Body);
                 var dataChange = DataChangeNotificationData.Decode(decoder);
@@ -498,41 +464,21 @@ namespace TinyUa.Client.Subscriptions
             catch (Exception ex) { _logger?.LogWarning(ex, $"Subscription {SubscriptionId}: OnDataChange event handler threw"); }
         }
 
-        internal async Task<StatusCode[]> DeleteMonitoredItemsAsync(uint[] monitoredItemIds)
-        {
-            if (monitoredItemIds == null || monitoredItemIds.Length == 0)
-                return Array.Empty<StatusCode>();
-
-            var results = await _router.DeleteMonitoredItemsAsync(SubscriptionId, monitoredItemIds).ConfigureAwait(false);
-
-            lock (_lock)
-            {
-                var idsToRemove = new HashSet<uint>(monitoredItemIds);
-                var handlesToRemove = MonitoredItems
-                    .Where(kvp => idsToRemove.Contains(kvp.Value.MonitoredItemId))
-                    .Select(kvp => kvp.Key)
-                    .ToList();
-                foreach (var handle in handlesToRemove)
-                    MonitoredItems.Remove(handle);
-            }
-
-            return results;
-        }
-
-        internal async Task DeleteAsync()
+        internal async Task DeleteAsync(CancellationToken cancellationToken = default)
         {
             StopPublishing();
 
-            _router?.Unregister(SubscriptionId);
+            _router?.Unregister(SubscriptionId, this);
 
             try
             {
-                await _router.DeleteSubscriptionsAsync(new[] { SubscriptionId }).ConfigureAwait(false);
+                if (_router != null && Interlocked.Exchange(ref _deleteSent, 1) == 0)
+                {
+                    var results = await _router.DeleteSubscriptionsAsync(new[] { SubscriptionId }, cancellationToken).ConfigureAwait(false);
+                    foreach (var status in results) status.Check();
+                }
             }
-            catch (Exception ex)
-            {
-                _logger?.LogDebug(ex, $"Subscription {SubscriptionId}: DeleteSubscriptions error (ignored)");
-            }
+            finally { Dispose(); }
         }
 
         /// <summary>
@@ -547,15 +493,27 @@ namespace TinyUa.Client.Subscriptions
 
             StopDispatching();
 
-            _router?.Unregister(SubscriptionId);
+            _router?.Unregister(SubscriptionId, this);
+            Disposed?.Invoke(this);
+            if (_router != null && Interlocked.Exchange(ref _deleteSent, 1) == 0)
+                _router.DeleteSubscriptionsAsync(new[] { SubscriptionId }).Forget(_logger, "Dispose subscription on server");
+        }
+
+        private void RaisePublishError(Exception exception)
+        {
+            try { OnPublishError?.Invoke(exception); }
+            catch (Exception ex) { _logger?.LogWarning(ex, "Publish error handler threw"); }
         }
 
         private sealed class DispatchItem
         {
+            internal int Generation { get; init; }
             internal PublishResponse? PublishResponse { get; }
             internal NotificationMessage? RepublishedMessage { get; }
             private readonly TaskCompletionSource<bool>? _completion;
 
+            internal bool HasNotifications => (PublishResponse?.Parameters.NotificationMessage.NotificationData.Count
+                ?? RepublishedMessage?.NotificationData.Count ?? 0) > 0;
             internal uint SequenceNumber => PublishResponse?.Parameters.NotificationMessage.SequenceNumber
                 ?? RepublishedMessage?.SequenceNumber
                 ?? 0;

@@ -17,7 +17,7 @@ public class ReliabilityFixTests
 
     [Theory]
     [InlineData(3600000, 2700000)]
-    [InlineData(1000, 1000)]
+    [InlineData(1000, 750)] // Renew before even a short token lifetime expires.
     [InlineData(0, 2700000)]
     public void ChannelRenewInterval_UsesEffectiveLifetime(int lifetime, int expectedInterval)
     {

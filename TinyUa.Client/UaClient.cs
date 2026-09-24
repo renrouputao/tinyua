@@ -44,12 +44,18 @@ namespace TinyUa.Client
         private readonly SubscriptionRegistry _subscriptions = new();
         private readonly UaClientOptions _options;
         private readonly ILogger _logger;
+        private IDisposable? _ownedLogger;
         private volatile string? _endpointUrl;
         private int _disposed;
         private volatile KeepAliveManager? _keepAliveManager;
         private volatile ReconnectEngine? _reconnectEngine;
 
-        private TaskCompletionSource<bool>? _stopInProgress;
+        private Task? _stopTask;
+        private Task? _disposeTask;
+        private readonly object _lifecycleLock = new();
+        private Task? _runTask;
+        private CancellationTokenSource? _runCancellation;
+        private volatile bool _stopRequested;
 
         private readonly record struct ReconnectRequest(
             ReconnectEngine? Engine,
@@ -70,7 +76,7 @@ namespace TinyUa.Client
         /// The private options snapshot taken at construction time. Mutations of the object passed
         /// to the constructor have no effect on a running client.
         /// </summary>
-        public UaClientOptions Options => _options;
+        public UaClientOptions Options => _options.Clone();
 
         /// <summary>The actual channel lifetime negotiated with the server (milliseconds).</summary>
         public uint RevisedChannelLifetime => _client?.RevisedChannelLifetime ?? 0;
@@ -154,7 +160,32 @@ namespace TinyUa.Client
         /// <exception cref="ObjectDisposedException">Client has been disposed.</exception>
         /// <exception cref="UaConnectionException">All reconnect attempts failed.</exception>
         /// <exception cref="OperationCanceledException">The connection attempt was cancelled.</exception>
-        public async Task RunAsync(CancellationToken cancellationToken)
+        public Task RunAsync(CancellationToken cancellationToken)
+        {
+            ThrowIfDisposed();
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (_lifecycleLock)
+            {
+                if (_stopRequested) throw new InvalidOperationException("Stop is still in progress.");
+                if (_runTask is { IsCompleted: false }) return _runTask.WaitAsync(cancellationToken);
+                if (IsConnected) return Task.CompletedTask;
+                if (_stateMachine.State == ClientState.Reconnecting) return EnsureConnectedAsync(cancellationToken);
+                _runCancellation?.Dispose();
+                _runCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var token = _runCancellation.Token;
+                _runTask = Task.Run(() => RunCoreAsync(token), CancellationToken.None);
+                return AwaitOwnedRunAsync(_runTask, cancellationToken);
+            }
+        }
+
+        private static async Task AwaitOwnedRunAsync(Task run, CancellationToken callerToken)
+        {
+            try { await run.ConfigureAwait(false); }
+            catch (OperationCanceledException ex) when (callerToken.IsCancellationRequested)
+            { throw new OperationCanceledException("Connection attempt cancelled.", ex, callerToken); }
+        }
+
+        private async Task RunCoreAsync(CancellationToken cancellationToken)
         {
             if (string.IsNullOrEmpty(_endpointUrl))
                 throw new InvalidOperationException(
@@ -173,7 +204,7 @@ namespace TinyUa.Client
             if (!startConnecting) return;
 
             var retries = 0;
-            var backoff = new BackoffPolicy(_options.ReconnectInitialDelayMs, _options.ReconnectMaxDelayMs);
+            var backoff = new BackoffPolicy(_options.ReconnectInitialDelayMs, _options.ReconnectMaxDelayMs, jitter: true);
             var maxRetries = _options.ReconnectMaxRetries;
 
             while (maxRetries < 0 || retries <= maxRetries)
@@ -204,7 +235,7 @@ namespace TinyUa.Client
 
                     bool reentered = _stateMachine.Transition(state =>
                     {
-                        if (IsDisposed || state == ClientState.Disconnecting) return null;
+                        if (IsDisposed || cancellationToken.IsCancellationRequested || state == ClientState.Disconnecting) return null;
                         return ClientState.Connecting;
                     });
                     if (!reentered) return;
@@ -227,7 +258,9 @@ namespace TinyUa.Client
             // peer. Close the transport first so graceful cleanup cannot wait on that peer.
             StopAndDisposeKeepAlive();
             try { await _client.DisconnectAsync().ConfigureAwait(false); } catch { }
-            try { await StopAsync().ConfigureAwait(false); } catch { }
+            try { await _client.CloseSessionAsync().ConfigureAwait(false); } catch { }
+            _client.ConnectionLost -= OnSocketConnectionLost;
+            _stateMachine.Transition(state => state == ClientState.Disconnecting ? null : ClientState.Disconnected);
         }
 
         private async Task ConnectInternalAsync(string endpointUrl, CancellationToken cancellationToken)
@@ -239,18 +272,8 @@ namespace TinyUa.Client
             await _orchestrator.ConnectAsync(endpointUrl, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
 
+            _client.ConnectionLost -= OnSocketConnectionLost;
             _client.ConnectionLost += OnSocketConnectionLost;
-
-            bool connectCompleted = _stateMachine.Transition(state =>
-            {
-                if (!IsDisposed && state == ClientState.Connecting)
-                    return ClientState.Connected;
-                return null;
-            });
-            if (!connectCompleted)
-                return;
-
-            StartKeepAlive();
 
             // Warmup read: Server.ServerStatus.State (i=2259) — the same node KeepAliveManager
             // polls later. Reading it once here pre-compiles (JIT) the entire Read call stack
@@ -289,10 +312,14 @@ namespace TinyUa.Client
             cancellationToken.ThrowIfCancellationRequested();
             var sessionId = _client.SessionId;
             var authToken = _client.AuthenticationToken ?? new NodeId();
-            _reconnectEngine = new ReconnectEngine(_client, _options, _logger);
+            _reconnectEngine?.Dispose();
+            var engine = new ReconnectEngine(_client, _options, _logger);
+            _reconnectEngine = engine;
             _reconnectEngine.ReconnectCompleted += (lossless) =>
             {
-                _stateMachine.Set(ClientState.Connected);
+                if (!_stateMachine.Transition(state => !IsDisposed && !_stopRequested
+                    && ReferenceEquals(_reconnectEngine, engine) && state == ClientState.Reconnecting
+                    ? ClientState.Connected : null)) return;
 
                 StartKeepAlive();
 
@@ -306,59 +333,48 @@ namespace TinyUa.Client
 
                 RaiseSubscriptionsRecovered(lossless);
             };
-            _reconnectEngine.ReconnectFailed += () => _stateMachine.Set(ClientState.Disconnected);
+            _reconnectEngine.ReconnectFailed += () => _stateMachine.Transition(state =>
+                ReferenceEquals(_reconnectEngine, engine) && state == ClientState.Reconnecting
+                    ? ClientState.Disconnected : null);
             _reconnectEngine.ReconnectBackoff += RaiseReconnectBackoff;
 
             if (sessionId != null)
                 _reconnectEngine.OnSessionEstablished(sessionId, authToken);
+
+            cancellationToken.ThrowIfCancellationRequested();
+            bool connectCompleted = _stateMachine.Transition(state =>
+                !IsDisposed && !_stopRequested && state == ClientState.Connecting
+                    ? ClientState.Connected : null);
+            if (connectCompleted && !_stopRequested) StartKeepAlive();
         }
 
         /// <summary>Stop the connection and release the session. Returns immediately if already disconnected.</summary>
         public Task StopAsync()
         {
 
-            if (IsDisposed) return Task.CompletedTask;
+            if (IsDisposed) return _disposeTask ?? Task.CompletedTask;
             return StopAsyncCore();
         }
 
-        private async Task StopAsyncCore()
+        private Task StopAsyncCore()
         {
-            TaskCompletionSource<bool>? waiter = null;
-            bool iAmStopper = false;
-            bool alreadyDisconnected = false;
-
-            _stateMachine.Transition(state =>
+            lock (_lifecycleLock)
             {
-                if (state == ClientState.Disconnected)
-                {
-                    alreadyDisconnected = true;
-                    return null;
-                }
-                if (state == ClientState.Disconnecting)
-                {
-                    waiter = _stopInProgress;
-                    return null;
-                }
-                iAmStopper = true;
-                _stopInProgress = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-                return ClientState.Disconnecting;
-            });
-
-            if (alreadyDisconnected)
-            {
-                _stateMachine.Replay(ClientState.Disconnecting);
-                _stateMachine.Replay(ClientState.Disconnected);
-                return;
+                if (_stopTask is { IsCompleted: false }) return _stopTask;
+                _stopRequested = true;
+                _runCancellation?.Cancel();
+                var connecting = _runTask;
+                _stopTask = Task.Run(() => StopOwnedLifecycleAsync(connecting));
+                return _stopTask;
             }
+        }
 
-            if (!iAmStopper)
-            {
-                if (waiter != null)
-                {
-                    try { await waiter.Task.ConfigureAwait(false); } catch { }
-                }
-                return;
-            }
+        private async Task StopOwnedLifecycleAsync(Task? connecting)
+        {
+            if (connecting != null) { try { await connecting.ConfigureAwait(false); } catch { } }
+            if (_reconnectEngine != null) await _reconnectEngine.StopAsync().ConfigureAwait(false);
+            _client.ConnectionLost -= OnSocketConnectionLost;
+            _stateMachine.Set(ClientState.Disconnecting);
 
             // The transition above already raised StateChanged(Disconnecting).
             try
@@ -380,9 +396,7 @@ namespace TinyUa.Client
             {
                 _stateMachine.Set(ClientState.Disconnected);
 
-                var tcs = _stopInProgress;
-                _stopInProgress = null;
-                tcs?.TrySetResult(true);
+                lock (_lifecycleLock) _stopRequested = false;
             }
         }
 
@@ -400,7 +414,7 @@ namespace TinyUa.Client
             var channelLifetime = _client.RevisedChannelLifetime > 0
                 ? _client.RevisedChannelLifetime
                 : _options.ChannelLifetime;
-            _keepAliveManager = new KeepAliveManager(_client, (int)_options.SessionTimeout, (int)channelLifetime,
+            _keepAliveManager = new KeepAliveManager(_client, (int)Math.Clamp(_client.RevisedSessionTimeout > 0 ? _client.RevisedSessionTimeout : _options.SessionTimeout, 1, int.MaxValue), (int)channelLifetime,
                 _logger, _options.SessionKeepAliveIntervalMs);
             _keepAliveManager.Start();
         }
@@ -469,7 +483,7 @@ namespace TinyUa.Client
             var canReconnect = false;
             var stateChanged = _stateMachine.Transition(state =>
             {
-                if (IsDisposed || state == ClientState.Disconnecting || state == ClientState.Disconnected)
+                if (IsDisposed || _stopRequested || state == ClientState.Connecting || state == ClientState.Disconnecting || state == ClientState.Disconnected)
                     return null;
 
                 engine = _reconnectEngine;
@@ -490,41 +504,26 @@ namespace TinyUa.Client
             return new ReconnectRequest(engine, endpointUrl, canReconnect, stateChanged);
         }
 
+        private void StartBackgroundReconnect()
+        {
+            var request = EnterReconnecting();
+            if (request.StateChanged && request.IsReady)
+                request.Engine!.ReconnectAsync(request.EndpointUrl!, RebuildSubscriptionAsync).Forget(_logger, "Background reconnect");
+        }
+
         private async Task<Subscription?> RebuildSubscriptionAsync(SubscriptionTemplate template)
         {
-
-            var oldSub = template.ActiveSubscription;
-            if (oldSub != null)
-            {
-                oldSub.StopPublishing();
-                try { oldSub.Dispose(); } catch { }
-                _subscriptions.Remove(oldSub);
-            }
-
-            var sub = await SubscriptionManager.CreateSubscriptionAsync(
-                _subscriptionRouter,
-                template.PublishingInterval,
-                autoStart: true,
-                template.MaxPublishRequests,
-                _logger,
-                _options.SubscriptionDispatch).ConfigureAwait(false);
-
-            template.SubscriptionId = sub.SubscriptionId;
-            template.ActiveSubscription = sub;
-
-            _subscriptions.Add(sub);
-
-            foreach (var item in template.Items)
-            {
-                await sub.AddMonitoredItemAsync(item.NodeId, item.SamplingInterval, item.Handler, item.QueueSize, item.HandlerEx).ConfigureAwait(false);
-            }
-
-            return sub;
+            var subscription = template.ActiveSubscription;
+            if (subscription == null || subscription.IsSubscriptionDisposed) return null;
+            await subscription.RebuildAsync(template.CancellationToken).ConfigureAwait(false);
+            template.SubscriptionId = subscription.SubscriptionId;
+            return subscription;
         }
 
         private async Task EnsureConnectedAsync(CancellationToken cancellationToken = default)
         {
             ThrowIfDisposed();
+            cancellationToken.ThrowIfCancellationRequested();
 
             if (_stateMachine.State == ClientState.Connected && _client.IsAlive)
                 return;
@@ -549,15 +548,15 @@ namespace TinyUa.Client
             throw new UaConnectionException($"Reconnect failed after max retries ({_options.ReconnectMaxRetries})");
         }
 
-        private static bool IsConnectionError(Exception ex)
+        internal static bool IsConnectionError(Exception ex)
         {
             if (ex is System.Net.Sockets.SocketException) return true;
             if (ex is System.IO.IOException) return true;
             if (ex is UaException ua)
             {
 
-                uint code = ua.StatusCode & 0xC0000000;
-                return code == 0x80000000;
+                return (ua.StatusCode & 0xFFFF0000) is 0x80860000 or 0x80220000
+                    or 0x80250000 or 0x80260000 or 0x80850000 or 0x808A0000 or 0x80AE0000;
             }
             return false;
         }
@@ -572,16 +571,17 @@ namespace TinyUa.Client
                     await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
                     return await operation().ConfigureAwait(false);
                 }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
                 catch (TimeoutException ex)
                 {
 
                     _logger.LogWarning(ex, $"{operationName} timed out waiting for reconnection");
-                    EnterReconnecting();
+                    StartBackgroundReconnect();
                     if (_options.ErrorMode == ErrorMode.Throw)
                         throw new UaConnectionException($"{operationName} timed out waiting for reconnection");
                     return null;
                 }
-                catch (Exception ex) when (attempt == 0 && IsConnectionError(ex))
+                catch (Exception ex) when (attempt == 0 && operationName != "Write" && IsConnectionError(ex))
                 {
                     _logger.LogWarning(ex, $"{operationName} failed with connection error — reconnecting and retrying");
                     EnterReconnecting();
@@ -589,6 +589,7 @@ namespace TinyUa.Client
                 }
                 catch (Exception ex)
                 {
+                    if (IsConnectionError(ex)) StartBackgroundReconnect();
                     if (_options.ErrorMode == ErrorMode.Throw)
                         throw new UaOperationException($"{operationName} failed", ex);
                     return null;
@@ -610,7 +611,7 @@ namespace TinyUa.Client
         public async Task<ReadResult?> ReadAsync(NodeId nodeId, AttributeId attributeId = AttributeId.Value, CancellationToken cancellationToken = default)
         {
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
-            var results = await ExecuteWithRetryAsync("Read", () => _client!.ReadAsync(nodeId, attributeId), cancellationToken).ConfigureAwait(false);
+            var results = await ExecuteWithRetryAsync("Read", () => _client!.ReadAsync(nodeId, attributeId, cancellationToken), cancellationToken).ConfigureAwait(false);
             if (results == null || results.Length == 0) return null;
             var dv = results[0];
             return new ReadResult { NodeId = nodeId, StatusCode = dv?.StatusCode ?? StatusCode.Bad, DataValue = dv };
@@ -630,7 +631,7 @@ namespace TinyUa.Client
         {
             if (nodeIds == null) throw new ArgumentNullException(nameof(nodeIds));
             if (nodeIds.Length == 0) throw new ArgumentException("NodeIds array cannot be empty", nameof(nodeIds));
-            return await ExecuteWithRetryAsync("Read", () => _client!.ReadAsync(nodeIds, attributeId), cancellationToken).ConfigureAwait(false);
+            return await ExecuteWithRetryAsync("Read", () => _client!.ReadAsync(nodeIds, attributeId, cancellationToken), cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -689,7 +690,8 @@ namespace TinyUa.Client
 
         /// <summary>
         /// Write a value to a single node. Returns a <see cref="WriteResult"/> with the NodeId and <see cref="StatusCode"/>.
-        /// Includes automatic reconnect and connection-error retry. The OPC UA type is inferred from the CLR type automatically.
+        /// Waits for an available connection but never automatically replays an uncertain Write.
+        /// The OPC UA type is inferred from the CLR type automatically.
         /// </summary>
         /// <param name="nodeId">The target node.</param>
         /// <param name="value">The value to write (<c>int</c>, <c>double</c>, <c>string</c>, <c>bool</c>, etc.).</param>
@@ -714,7 +716,7 @@ namespace TinyUa.Client
         {
             if (values == null) throw new ArgumentNullException(nameof(values));
             if (values.Length == 0) throw new ArgumentException("WriteValues array cannot be empty", nameof(values));
-            return await ExecuteWithRetryAsync("Write", () => _client!.WriteAsync(values), cancellationToken).ConfigureAwait(false);
+            return await ExecuteWithRetryAsync("Write", () => _client!.WriteAsync(values, cancellationToken), cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -773,7 +775,7 @@ namespace TinyUa.Client
         public async Task<BrowseResult[]?> BrowseAsync(NodeId nodeId, BrowseDirection direction = BrowseDirection.Forward, uint maxReferences = 100, CancellationToken cancellationToken = default)
         {
             if (nodeId == null) throw new ArgumentNullException(nameof(nodeId));
-            return await ExecuteWithRetryAsync("Browse", () => _client!.BrowseAsync(nodeId, direction, maxReferences), cancellationToken).ConfigureAwait(false);
+            return await ExecuteWithRetryAsync("Browse", () => _client!.BrowseAsync(nodeId, direction, maxReferences, cancellationToken), cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -785,11 +787,11 @@ namespace TinyUa.Client
         public async Task<BrowseResult[]?> BrowseNextAsync(byte[] continuationPoint, CancellationToken cancellationToken = default)
         {
             if (continuationPoint == null) throw new ArgumentNullException(nameof(continuationPoint));
-            return await ExecuteWithRetryAsync("BrowseNext", () => _client!.BrowseNextAsync(continuationPoint), cancellationToken).ConfigureAwait(false);
+            return await ExecuteWithRetryAsync("BrowseNext", () => _client!.BrowseNextAsync(continuationPoint, cancellationToken), cancellationToken).ConfigureAwait(false);
         }
 
         private Task<Subscription> GetOrCreateDefaultSubscriptionAsync(double interval, CancellationToken cancellationToken = default)
-            => _subscriptions.GetOrCreateAsync(interval, () => CreateSubscriptionAsync(interval, cancellationToken));
+            => _subscriptions.GetOrCreateAsync(interval, () => CreateSubscriptionAsync(interval, cancellationToken), cancellationToken);
 
         /// <summary>
         /// Create a subscription. Multiple calls with the same <paramref name="publishingInterval"/>
@@ -808,7 +810,7 @@ namespace TinyUa.Client
                 autoStart: true,
                 _options.MaxPublishRequests,
                 _logger,
-                _options.SubscriptionDispatch).ConfigureAwait(false);
+                _options.SubscriptionDispatch, cancellationToken).ConfigureAwait(false);
 
             var template = new SubscriptionTemplate
             {
@@ -818,10 +820,14 @@ namespace TinyUa.Client
                 MaxKeepAliveCount = sub.MaxKeepAliveCount,
                 MaxPublishRequests = _options.MaxPublishRequests
             };
-            _reconnectEngine?.RegisterSubscription(template, sub);
-
-            _subscriptions.Add(sub);
-
+            sub.Disposed += OnSubscriptionDisposed;
+            lock (_lifecycleLock)
+            {
+                if (_stopRequested || State != ClientState.Connected || IsDisposed)
+                { sub.Dispose(); throw new UaConnectionException("Connection stopped during subscription creation."); }
+                _reconnectEngine?.RegisterSubscription(template, sub);
+                _subscriptions.Add(sub);
+            }
             return sub;
         }
 
@@ -831,20 +837,20 @@ namespace TinyUa.Client
         public async Task DeleteSubscriptionAsync(Subscription subscription, CancellationToken cancellationToken = default)
         {
             if (subscription == null) throw new ArgumentNullException(nameof(subscription));
-            _reconnectEngine?.UnregisterSubscription(subscription.SubscriptionId);
+            _reconnectEngine?.UnregisterSubscription(subscription);
             _subscriptions.Remove(subscription);
-            await subscription.DeleteAsync().ConfigureAwait(false);
+            await subscription.DeleteAsync(cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>Delete specific monitored items from a subscription.</summary>
         /// <param name="subscription">The parent subscription.</param>
-        /// <param name="monitoredItemIds">The monitored item IDs to remove.</param>
+        /// <param name="monitoredItemIds">Stable logical IDs returned by SubscribeAsync, valid across reconnects.</param>
         /// <param name="cancellationToken">Cancellation token.</param>
         /// <returns>Status code for each delete operation.</returns>
         public async Task<StatusCode[]> DeleteMonitoredItemsAsync(Subscription subscription, uint[] monitoredItemIds, CancellationToken cancellationToken = default)
         {
             if (subscription == null) throw new ArgumentNullException(nameof(subscription));
-            return await subscription.DeleteMonitoredItemsAsync(monitoredItemIds).ConfigureAwait(false);
+            return await subscription.DeleteMonitoredItemsAsync(monitoredItemIds, cancellationToken).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -866,7 +872,7 @@ namespace TinyUa.Client
 
             await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
             var sub = await GetOrCreateDefaultSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
-            var item = await sub.AddMonitoredItemAsync(nodeId, handler, queueSize).ConfigureAwait(false);
+            var item = await sub.AddMonitoredItemAsync(nodeId, handler, queueSize, cancellationToken).ConfigureAwait(false);
             UpdateTemplate(sub, nodeId, interval, queueSize, handler, clientHandle: item.ClientHandle);
             return (sub, item.MonitoredItemId);
         }
@@ -888,11 +894,7 @@ namespace TinyUa.Client
 
             await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
             var sub = await GetOrCreateDefaultSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
-            for (int i = 0; i < nodeIds.Length; i++)
-            {
-                var item = await sub.AddMonitoredItemAsync(nodeIds[i], handler, queueSize).ConfigureAwait(false);
-                UpdateTemplate(sub, nodeIds[i], interval, queueSize, handler, clientHandle: item.ClientHandle);
-            }
+            await sub.AddBatchAsync(nodeIds, interval, handler, queueSize, null, cancellationToken).ConfigureAwait(false);
             return sub;
         }
 
@@ -916,7 +918,7 @@ namespace TinyUa.Client
 
             await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
             var sub = await GetOrCreateDefaultSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
-            var item = await sub.AddMonitoredItemAsync(nodeId, interval, handler: null, queueSize, handlerEx: handler).ConfigureAwait(false);
+            var item = await sub.AddMonitoredItemAsync(nodeId, interval, handler: null, queueSize, handlerEx: handler, cancellationToken: cancellationToken).ConfigureAwait(false);
             UpdateTemplate(sub, nodeId, interval, queueSize, handler: null, handlerEx: handler, clientHandle: item.ClientHandle);
             return (sub, item.MonitoredItemId);
         }
@@ -939,12 +941,15 @@ namespace TinyUa.Client
 
             await EnsureConnectedAsync(cancellationToken).ConfigureAwait(false);
             var sub = await GetOrCreateDefaultSubscriptionAsync(interval, cancellationToken).ConfigureAwait(false);
-            for (int i = 0; i < nodeIds.Length; i++)
-            {
-                var item = await sub.AddMonitoredItemAsync(nodeIds[i], interval, handler: null, queueSize, handlerEx: handler).ConfigureAwait(false);
-                UpdateTemplate(sub, nodeIds[i], interval, queueSize, handler: null, handlerEx: handler, clientHandle: item.ClientHandle);
-            }
+            await sub.AddBatchAsync(nodeIds, interval, null, queueSize, handler, cancellationToken).ConfigureAwait(false);
             return sub;
+        }
+
+        private void OnSubscriptionDisposed(Subscription sub)
+        {
+            _reconnectEngine?.UnregisterSubscription(sub);
+            _subscriptions.Remove(sub);
+            sub.Disposed -= OnSubscriptionDisposed;
         }
 
         private void UpdateTemplate(Subscription sub, NodeId nodeId, double samplingInterval, uint queueSize, DataChangeHandler? handler, DataChangeHandlerEx? handlerEx = null, uint clientHandle = 0)
@@ -983,20 +988,6 @@ namespace TinyUa.Client
             if (string.IsNullOrEmpty(nodeIdString))
                 throw new ArgumentException("NodeId string cannot be null or empty", nameof(nodeIdString));
 
-            if (nodeIdString.StartsWith("s="))
-            {
-                var parts = nodeIdString.Substring(2).Split(new[] { ';' }, 2);
-                if (parts.Length == 2 && parts[0].StartsWith("ns="))
-                {
-                    try
-                    {
-                        var ns = ushort.Parse(parts[0].Substring(3));
-                        return new NodeId(parts[1], ns);
-                    }
-                    catch { }
-                }
-            }
-
             try
             {
                 return NodeId.Parse(nodeIdString);
@@ -1016,14 +1007,24 @@ namespace TinyUa.Client
         /// Release client resources: disconnect, stop reconnect engine, release socket.
         /// Safe to call multiple times (idempotent).
         /// </summary>
-        public async ValueTask DisposeAsync()
+        public ValueTask DisposeAsync()
         {
+            lock (_lifecycleLock)
+            {
+                if (_disposeTask != null) return new ValueTask(_disposeTask);
+                Interlocked.Exchange(ref _disposed, 1);
+                _disposeTask = Task.Run(DisposeOwnedClientAsync);
+                return new ValueTask(_disposeTask);
+            }
+        }
 
-            if (Interlocked.CompareExchange(ref _disposed, 1, 0) != 0) return;
-
+        private async Task DisposeOwnedClientAsync()
+        {
             try { await StopAsyncCore().ConfigureAwait(false); } catch { }
             try { _reconnectEngine?.Dispose(); } catch { }
-            try { _client?.Dispose(); } catch { }
+            try { await _client.DisposeAsync().ConfigureAwait(false); } catch { }
+            _runCancellation?.Dispose();
+            _ownedLogger?.Dispose();
             GC.SuppressFinalize(this);
         }
 
@@ -1059,7 +1060,7 @@ namespace TinyUa.Client
                 else
                     onDataChanged(default);
             };
-            var item = await sub.AddMonitoredItemAsync(nodeId, handler).ConfigureAwait(false);
+            var item = await sub.AddMonitoredItemAsync(nodeId, handler, cancellationToken: cancellationToken).ConfigureAwait(false);
             UpdateTemplate(sub, nodeId, interval, 0, handler, clientHandle: item.ClientHandle);
             return sub;
         }
@@ -1090,7 +1091,7 @@ namespace TinyUa.Client
                 else
                     onDataChanged(default, status);
             };
-            var item = await sub.AddMonitoredItemAsync(nodeId, handler).ConfigureAwait(false);
+            var item = await sub.AddMonitoredItemAsync(nodeId, handler, cancellationToken: cancellationToken).ConfigureAwait(false);
             UpdateTemplate(sub, nodeId, interval, 0, handler, clientHandle: item.ClientHandle);
             return sub;
         }

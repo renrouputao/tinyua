@@ -195,18 +195,17 @@ public class OpcUaClientTests
             await client.DisposeAsync();
     }
 
-    [Fact]
+    [LiveServerFact]
     public async Task Integration_DeleteMonitoredItems_DoesNotDropConnection()
     {
 
-        await using var probeClient = new UaClient("opc.tcp://localhost:4840",
+        await using var probeClient = new UaClient(LiveServerFactAttribute.Endpoint,
             new UaClientOptions { ReconnectMaxRetries = 0, Timeout = 1000 });
-        try { await probeClient.RunAsync(); }
-        catch { return; }
+        await probeClient.RunAsync();
         await probeClient.StopAsync();
         await probeClient.DisposeAsync();
 
-        await using var client = new UaClient("opc.tcp://localhost:4840",
+        await using var client = new UaClient(LiveServerFactAttribute.Endpoint,
             new UaClientOptions { ReconnectMaxRetries = 0, Timeout = 5000 });
         client.StateChanged += state =>
         {
@@ -245,18 +244,17 @@ public class OpcUaClientTests
         await client.StopAsync();
     }
 
-    [Fact]
+    [LiveServerFact]
     public async Task Integration_DeleteMonitoredItems_MatchesExplorerFlow()
     {
 
-        await using var probeClient = new UaClient("opc.tcp://localhost:4840",
+        await using var probeClient = new UaClient(LiveServerFactAttribute.Endpoint,
             new UaClientOptions { ReconnectMaxRetries = 0, Timeout = 1000 });
-        try { await probeClient.RunAsync(); }
-        catch { return; }
+        await probeClient.RunAsync();
         await probeClient.StopAsync();
         await probeClient.DisposeAsync();
 
-        await using var client = new UaClient("opc.tcp://localhost:4840",
+        await using var client = new UaClient(LiveServerFactAttribute.Endpoint,
             new UaClientOptions { ReconnectMaxRetries = 0, Timeout = 10000 });
         client.StateChanged += state =>
         {
@@ -298,7 +296,7 @@ public class OpcUaClientTests
     [Fact]
     public async Task StopAsync_BeforeRunAsync_DoesNotThrow()
     {
-        var client = new UaClient("opc.tcp://localhost:4840");
+        var client = new UaClient(LiveServerFactAttribute.Endpoint);
         await client.StopAsync();
         Assert.False(client.IsConnected);
     }
@@ -306,7 +304,7 @@ public class OpcUaClientTests
     [Fact]
     public async Task ErrorMode_ReturnNull_ReturnsNullOnFailure()
     {
-        var client = new UaClient("opc.tcp://localhost:4840", new UaClientOptions
+        var client = new UaClient(LiveServerFactAttribute.Endpoint, new UaClientOptions
         {
             ErrorMode = ErrorMode.ReturnNull,
             ReconnectMaxRetries = 0,
@@ -319,7 +317,7 @@ public class OpcUaClientTests
     [Fact]
     public async Task ErrorMode_Throw_ThrowsOnFailure()
     {
-        var client = new UaClient("opc.tcp://localhost:4840", new UaClientOptions
+        var client = new UaClient(LiveServerFactAttribute.Endpoint, new UaClientOptions
         {
             ErrorMode = ErrorMode.Throw,
             ReconnectMaxRetries = 0,
@@ -332,7 +330,7 @@ public class OpcUaClientTests
     public async Task StateChanged_FiresOnDispose()
     {
         var states = new List<ClientState>();
-        var client = new UaClient("opc.tcp://localhost:4840");
+        var client = new UaClient(LiveServerFactAttribute.Endpoint);
         client.StateChanged += s => states.Add(s);
 
         await client.DisposeAsync();
@@ -344,28 +342,28 @@ public class OpcUaClientTests
     [Fact]
     public async Task CreateSubscription_BeforeRunAsync_ThrowsConnectionException()
     {
-        var client = new UaClient("opc.tcp://localhost:4840");
+        var client = new UaClient(LiveServerFactAttribute.Endpoint);
         await Assert.ThrowsAsync<UaConnectionException>(() => client.CreateSubscriptionAsync());
     }
 
     [Fact]
     public async Task CreateSubscriptionAsync_BeforeRunAsync_Throws()
     {
-        var client = new UaClient("opc.tcp://localhost:4840", new UaClientOptions { ReconnectMaxRetries = 0, Timeout = 500 });
+        var client = new UaClient(LiveServerFactAttribute.Endpoint, new UaClientOptions { ReconnectMaxRetries = 0, Timeout = 500 });
         await Assert.ThrowsAsync<UaConnectionException>(() => client.CreateSubscriptionAsync());
     }
 
     [Fact]
     public async Task DeleteSubscriptionAsync_Null_ThrowsArgumentNullException()
     {
-        var client = new UaClient("opc.tcp://localhost:4840");
+        var client = new UaClient(LiveServerFactAttribute.Endpoint);
         await Assert.ThrowsAsync<ArgumentNullException>(() => client.DeleteSubscriptionAsync(null!));
     }
 
     [Fact]
     public async Task DeleteMonitoredItemsAsync_Null_ThrowsArgumentNullException()
     {
-        var client = new UaClient("opc.tcp://localhost:4840");
+        var client = new UaClient(LiveServerFactAttribute.Endpoint);
         await Assert.ThrowsAsync<ArgumentNullException>(() => client.DeleteMonitoredItemsAsync(null!, Array.Empty<uint>()));
     }
 

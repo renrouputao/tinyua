@@ -35,7 +35,13 @@ public partial class MainWindow : Window
 
         try
         {
-            await Task.Run(() => GenerateCertificate());
+            var input = new CertificateFileGenerator.CertificateInput(_vm.OutputDirectory, _vm.CommonName, _vm.ApplicationUri,
+                _vm.SelectedKeySize, int.Parse(_vm.ValidityYears), PfxPasswordBox.Password);
+            var result = await Task.Run(() => CertificateFileGenerator.GenerateCertificate(input));
+            _vm.PfxPath = result.PfxPath;
+            _vm.DerPath = result.DerPath;
+            _vm.Thumbprint = result.Thumbprint;
+            _vm.ExpiryDate = result.ExpiryDate;
             _vm.ResultText = BuildSuccessMessage();
         }
         catch (Exception ex)
@@ -73,73 +79,6 @@ public partial class MainWindow : Window
         return true;
     }
 
-    private void GenerateCertificate()
-    {
-        var dir = _vm.OutputDirectory;
-        Directory.CreateDirectory(dir);
-
-        var keySize = _vm.SelectedKeySize;
-        using var rsa = RSA.Create(keySize);
-
-        var req = new CertificateRequest(
-            $"CN={_vm.CommonName}",
-            rsa,
-            HashAlgorithmName.SHA256,
-            RSASignaturePadding.Pkcs1);
-
-        // SAN: URI + DNS
-        var sanBuilder = new SubjectAlternativeNameBuilder();
-        sanBuilder.AddUri(new Uri(_vm.ApplicationUri));
-        try { sanBuilder.AddDnsName(Environment.MachineName); }
-        catch { sanBuilder.AddDnsName("localhost"); }
-        req.CertificateExtensions.Add(sanBuilder.Build());
-
-        // Basic constraints
-        req.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
-
-        // Key usage
-        req.CertificateExtensions.Add(new X509KeyUsageExtension(
-            X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment
-            | X509KeyUsageFlags.DataEncipherment | X509KeyUsageFlags.NonRepudiation,
-            true));
-
-        // EKU: client + server auth
-        req.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
-            new OidCollection { new("1.3.6.1.5.5.7.3.2"), new("1.3.6.1.5.5.7.3.1") }, true));
-
-        var notBefore = DateTimeOffset.UtcNow.AddDays(-1);
-        var notAfter = DateTimeOffset.UtcNow.AddYears(int.Parse(_vm.ValidityYears));
-
-        var ephemeral = req.CreateSelfSigned(notBefore, notAfter);
-        byte[] pfxBytes = ephemeral.Export(X509ContentType.Pfx);
-        ephemeral.Dispose();
-
-        // Reload with exportable key
-        var password = PfxPasswordBox.Password;
-        var cert = string.IsNullOrEmpty(password)
-            ? new X509Certificate2(pfxBytes, (string?)null, X509KeyStorageFlags.Exportable)
-            : new X509Certificate2(pfxBytes, password, X509KeyStorageFlags.Exportable);
-
-        // Save files
-        var safeName = SanitizeFileName(_vm.CommonName);
-        _vm.PfxPath = Path.Combine(dir, $"{safeName}.pfx");
-        _vm.DerPath = Path.Combine(dir, $"{safeName}.der");
-        _vm.Thumbprint = cert.Thumbprint;
-        _vm.ExpiryDate = cert.NotAfter.ToString("yyyy-MM-dd");
-
-        var exportPassword = string.IsNullOrEmpty(password) ? (string?)null : password;
-        var finalPfx = string.IsNullOrEmpty(exportPassword)
-            ? cert.Export(X509ContentType.Pfx)
-            : cert.Export(X509ContentType.Pfx, exportPassword);
-        File.WriteAllBytes(_vm.PfxPath, finalPfx);
-        File.WriteAllBytes(_vm.DerPath, cert.RawData);
-
-        cert.Dispose();
-    }
-
-    private static string SanitizeFileName(string name) =>
-        string.Join("_", name.Split(Path.GetInvalidFileNameChars()));
-
     private string BuildSuccessMessage()
     {
         return $"Certificate generated successfully!\n\n"
@@ -154,7 +93,7 @@ public partial class MainWindow : Window
             + $"  .WithSecurity(opts => opts.Certificate = new CertificateOptions\n"
             + $"  {{\n"
             + $"      CertificatePath = @\"{_vm.PfxPath}\",\n"
-            + $"      PrivateKeyPassword = \"{PfxPasswordBox.Password}\",\n"
+            + $"      PrivateKeyPassword = \"[password]\",\n"
             + $"      AutoGenerate = false\n"
             + $"  }})";
     }

@@ -79,14 +79,17 @@ public partial class TreeNodeViewModel : ObservableObject
             var children = new List<TreeNodeViewModel>();
 
             var results = await _client.BrowseAsync(NodeId);
-            if (results != null && results.Length > 0)
+            if (results == null || results.Length == 0) throw new InvalidOperationException("Browse returned no results.");
+            if (results.Length > 0)
             {
+                results[0].StatusCode.Check();
                 CollectReferences(results[0], seen, children);
 
-                while (results[0].ContinuationPoint != null && results[0].ContinuationPoint.Length > 0)
+                while (results[0].ContinuationPoint is { Length: > 0 } continuationPoint)
                 {
-                    results = await _client.BrowseNextAsync(results[0].ContinuationPoint);
-                    if (results == null || results.Length == 0) break;
+                    results = await _client.BrowseNextAsync(continuationPoint);
+                    if (results == null || results.Length == 0) throw new InvalidOperationException("BrowseNext returned no results.");
+                    results[0].StatusCode.Check();
                     CollectReferences(results[0], seen, children);
                 }
             }
@@ -95,6 +98,12 @@ public partial class TreeNodeViewModel : ObservableObject
                 Children.Add(child);
 
             _childrenLoaded = true;
+        }
+        catch (Exception ex)
+        {
+            _childrenLoaded = false;
+            Children.Clear();
+            Children.Add(new TreeNodeViewModel(_client, null!, $"Browse failed: {ex.Message}. Collapse and expand to retry.", NodeClass.Unspecified, ""));
         }
         finally
         {

@@ -120,19 +120,22 @@ namespace TinyUa.Transport
                     $"Ciphertext ({decoder.Remaining} bytes) is shorter than signature size ({crypto.RemoteSignatureSize} bytes) — truncated or forged frame");
 
             var decrypted = crypto.Decrypt(decoder.ReadRemainingSpan());
+            try
+            {
+                int sigLen = crypto.RemoteSignatureSize;
+                var plaintext = decrypted.AsSpan(0, decrypted.Length - sigLen);
+                var signature = decrypted.AsSpan(decrypted.Length - sigLen);
 
-            int sigLen = crypto.RemoteSignatureSize;
-            var plaintext = decrypted.AsSpan(0, decrypted.Length - sigLen);
-            var signature = decrypted.AsSpan(decrypted.Length - sigLen);
+                var headerBytes = EncodeHeaderToBytes(chunk.MessageHeader);
+                var securityBytes = EncodeSecurityHeaderToBytes(chunk.SecurityHeader);
+                crypto.Verify(headerBytes, securityBytes, plaintext, signature);
 
-            var headerBytes = EncodeHeaderToBytes(chunk.MessageHeader);
-            var securityBytes = EncodeSecurityHeaderToBytes(chunk.SecurityHeader);
-            crypto.Verify(headerBytes, securityBytes, plaintext, signature);
-
-            int padSize = crypto.GetPaddingSize(plaintext);
-            var bodyDecoder = new BinaryDecoder(decrypted, 0, plaintext.Length - padSize);
-            chunk.SequenceHeader = SequenceHeader.Decode(bodyDecoder);
-            chunk.Body = bodyDecoder.GetRemainingBytes();
+                int padSize = crypto.GetPaddingSize(plaintext);
+                var bodyDecoder = new BinaryDecoder(decrypted, 0, plaintext.Length - padSize);
+                chunk.SequenceHeader = SequenceHeader.Decode(bodyDecoder);
+                chunk.Body = bodyDecoder.GetRemainingBytes();
+            }
+            finally { CryptographicOperations.ZeroMemory(decrypted); }
         }
 
         internal byte[] ToBinary()
@@ -221,16 +224,21 @@ namespace TinyUa.Transport
                         OpnDiagnostics.SelfVerify(asymForVerify, signedData, signature);
                     }
 
-                    var plaintextWithSig = new byte[paddedBody.Count + signature.Length];
-                    Buffer.BlockCopy(paddedBody.Array!, paddedBody.Offset, plaintextWithSig, 0, paddedBody.Count);
-                    Buffer.BlockCopy(signature, 0, plaintextWithSig, paddedBody.Count, signature.Length);
-                    var encrypted = Cryptography.TryEncryptInPlace(plaintextWithSig)
-                        ? plaintextWithSig
-                        : Cryptography.Encrypt(plaintextWithSig);
+                    bodyEncoder.WriteBytes(signature);
+                    var plaintextWithSig = bodyEncoder.GetBuffer();
+                    byte[]? encryptedArray = null;
+                    var encrypted = plaintextWithSig;
+                    if (!Cryptography.TryEncryptInPlace(plaintextWithSig.AsSpan()))
+                    {
+                        var temporary = plaintextWithSig.AsSpan().ToArray();
+                        try { encryptedArray = Cryptography.Encrypt(temporary); }
+                        finally { if (!ReferenceEquals(encryptedArray, temporary)) CryptographicOperations.ZeroMemory(temporary); }
+                        encrypted = new ArraySegment<byte>(encryptedArray);
+                    }
 
                     encoder.WriteBytes(headerBytes.Array!, headerBytes.Offset, headerBytes.Count);
                     encoder.WriteBytes(securityBytes.Array!, securityBytes.Offset, securityBytes.Count);
-                    encoder.WriteBytes(encrypted);
+                    encoder.WriteBytes(encrypted.Array!, encrypted.Offset, encrypted.Count);
 
                     if (SecurityDebugLogger.IsDebugEnabled && SecurityHeader is AsymmetricAlgorithmHeader asymForLog)
                     {
@@ -238,8 +246,9 @@ namespace TinyUa.Transport
                         // copies only when debug logging explicitly asks for them.
                         OpnDiagnostics.LogToBinary(asymForLog, MessageHeader, Cryptography,
                             headerBytes.AsSpan().ToArray(), securityBytes.AsSpan().ToArray(), bodyLength, padding, signature,
-                            encrypted, plainSize, encryptedSize, encoder.Length);
+                            encrypted.AsSpan().ToArray(), plainSize, encryptedSize, encoder.Length);
                     }
+                    if (encryptedArray != null) CryptographicOperations.ZeroMemory(encryptedArray);
                 }
                 else
                 {

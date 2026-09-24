@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 
 namespace TinyUa.Core.Security.Cryptography
 {
-    internal sealed class RsaCryptography : ICryptography
+    internal sealed class RsaCryptography : ICryptography, IDisposable
     {
         private readonly RSA _localPrivateKey;
         private readonly RSA _remotePublicKey;
@@ -12,6 +12,12 @@ namespace TinyUa.Core.Security.Cryptography
         private readonly int _localKeySize;
         private readonly int _remoteKeySize;
         private readonly int _oaepOverhead;
+
+        public void Dispose()
+        {
+            _localPrivateKey.Dispose();
+            _remotePublicKey.Dispose();
+        }
 
         internal RsaCryptography(
             RSA localPrivateKey,

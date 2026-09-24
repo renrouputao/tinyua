@@ -228,7 +228,7 @@ namespace TinyUa.Client.Services
                 ServerCertificate = decoder.ReadByteString()
             };
 
-            var endpointCount = decoder.ReadInt32();
+            var endpointCount = decoder.ReadArrayLength();
             if (endpointCount > 0)
             {
                 response.ServerEndpoints = new EndpointDescription[endpointCount];

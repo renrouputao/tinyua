@@ -1,5 +1,8 @@
 using TinyUa.Client.Services;
 using TinyUa.Core.Security;
+using TinyUa.Core.Security.Certificates;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 
 namespace TinyUa.Client.Security
 {
@@ -50,18 +53,49 @@ namespace TinyUa.Client.Security
 
             if (identityOptions.Type == UserTokenType.Certificate)
             {
+                if (string.IsNullOrEmpty(identityOptions.CertificatePath))
+                    throw new InvalidOperationException("A user certificate path is required for X509 identity.");
+                using var certificate = LoadUserCertificate(identityOptions);
+                using var key = certificate.GetRSAPrivateKey()
+                    ?? throw new InvalidOperationException("The user certificate requires an RSA private key.");
+                if (createResponse.ServerCertificate is not { Length: > 0 } || createResponse.ServerNonce is not { Length: > 0 })
+                    throw new InvalidOperationException("Server certificate and nonce are required for X509 identity.");
+                var signaturePolicy = SecurityPolicyFactory.IsSecurePolicy(tokenSecurityPolicy)
+                    ? tokenSecurityPolicy : policy.Uri;
+                if (!SecurityPolicyFactory.IsSecurePolicy(signaturePolicy))
+                    throw new InvalidOperationException("X509 identity requires a signature security policy.");
+                bool pss = signaturePolicy.EndsWith("#Aes256_Sha256_RsaPss", StringComparison.Ordinal);
+                var signedData = new byte[createResponse.ServerCertificate.Length + createResponse.ServerNonce.Length];
+                createResponse.ServerCertificate.CopyTo(signedData, 0);
+                createResponse.ServerNonce.CopyTo(signedData, createResponse.ServerCertificate.Length);
                 return new UserIdentityToken
                 {
                     TokenType = UserTokenType.Certificate,
                     PolicyId = userTokenPolicyId,
-                    IssuedId = policy.SenderCertificate,
-                    SecurityPolicyUri = policy.Uri
+                    IssuedId = certificate.RawData,
+                    SecurityPolicyUri = signaturePolicy,
+                    SignatureData = key.SignData(signedData, HashAlgorithmName.SHA256,
+                        pss ? RSASignaturePadding.Pss : RSASignaturePadding.Pkcs1),
+                    SignatureAlgorithm = pss ? "http://opcfoundation.org/UA/security/rsa-pss-sha2-256"
+                        : "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"
                 };
             }
+
+            if (identityOptions.Type != UserTokenType.Anonymous)
+                throw new NotSupportedException($"Unsupported user identity type: {identityOptions.Type}");
 
             var anonymous = UserIdentityToken.Anonymous();
             anonymous.PolicyId = userTokenPolicyId;
             return anonymous;
+        }
+
+        private static X509Certificate2 LoadUserCertificate(UserIdentityOptions options)
+        {
+            if (string.IsNullOrEmpty(options.PrivateKeyPath))
+                return CertificateLoader.LoadCertificate(options.CertificatePath!, options.PrivateKeyPassword);
+            var (certificate, key) = CertificateLoader.LoadCertificateWithKey(options.CertificatePath!, options.PrivateKeyPath);
+            key.Dispose();
+            return certificate;
         }
     }
 }

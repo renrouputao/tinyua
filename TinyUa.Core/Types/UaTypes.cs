@@ -447,10 +447,10 @@ namespace TinyUa.Core.Types
                 encoder.WriteUInt32(StatusCode!.Value.Value);
             if ((_encoding & 0x04) != 0)
                 encoder.WriteDateTime(SourceTimestamp!.Value);
-            if ((_encoding & 0x08) != 0)
-                encoder.WriteDateTime(ServerTimestamp!.Value);
             if ((_encoding & 0x10) != 0)
                 encoder.WriteUInt16(SourcePicoseconds!.Value);
+            if ((_encoding & 0x08) != 0)
+                encoder.WriteDateTime(ServerTimestamp!.Value);
             if ((_encoding & 0x20) != 0)
                 encoder.WriteUInt16(ServerPicoseconds!.Value);
         }
@@ -471,10 +471,10 @@ namespace TinyUa.Core.Types
                 dv.StatusCode = new StatusCode(decoder.ReadUInt32());
             if ((encoding & 0x04) != 0)
                 dv.SourceTimestamp = decoder.ReadDateTime();
-            if ((encoding & 0x08) != 0)
-                dv.ServerTimestamp = decoder.ReadDateTime();
             if ((encoding & 0x10) != 0)
                 dv.SourcePicoseconds = decoder.ReadUInt16();
+            if ((encoding & 0x08) != 0)
+                dv.ServerTimestamp = decoder.ReadDateTime();
             if ((encoding & 0x20) != 0)
                 dv.ServerPicoseconds = decoder.ReadUInt16();
 

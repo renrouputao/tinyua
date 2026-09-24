@@ -111,7 +111,7 @@ namespace TinyUa.Core.Types
             // which is a ByteString scalar) are not IConvertible — running them through
             // ConvertToTargetType throws (numeric arrays) or corrupts them to "System.T[]"
             // (string arrays). Their elements already carry the correct type from the decoder.
-            bool isArrayValue = value is Array && value.GetType() != typeof(byte[]);
+            bool isArrayValue = value is Array && (value.GetType() != typeof(byte[]) || type == VariantType.Byte);
             if (type != null && value != null && !isArrayValue)
                 value = ConvertToTargetType(value, type.Value);
 
@@ -231,7 +231,7 @@ namespace TinyUa.Core.Types
         }
 
         /// <summary>
-        /// Gets the value cast to type <typeparamref name="T"/>. Uses <see cref="Convert.ChangeType"/>
+        /// Gets the value cast to type <typeparamref name="T"/>. Uses <see cref="Convert.ChangeType(object, Type)"/>
         /// if a direct cast is not possible.
         /// </summary>
         /// <typeparam name="T">The target CLR type.</typeparam>

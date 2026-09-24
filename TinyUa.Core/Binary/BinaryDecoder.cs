@@ -39,6 +39,8 @@ namespace TinyUa.Core.Binary
         public BinaryDecoder(byte[] data, int offset, int count)
         {
             _data = data ?? throw new ArgumentNullException(nameof(data));
+            if (offset < 0 || count < 0 || offset > data.Length - count)
+                throw new ArgumentOutOfRangeException(nameof(count));
             _offset = offset;
             _count = count;
             _position = 0;
@@ -67,7 +69,7 @@ namespace TinyUa.Core.Binary
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private ReadOnlySpan<byte> ReadSpan(int count)
         {
-            if (_position + count > _count)
+            if (count < 0 || count > Remaining)
                 throw new InvalidOperationException($"Not enough data: need {count}, have {Remaining}");
             var span = _data.AsSpan(_offset + _position, count);
             _position += count;
@@ -182,7 +184,8 @@ namespace TinyUa.Core.Binary
         public string? ReadString()
         {
             var length = ReadInt32();
-            if (length < 0)
+            if (length < -1) throw new InvalidOperationException("Invalid negative length.");
+            if (length == -1)
                 return null;
 
             if (length == 0)
@@ -200,7 +203,8 @@ namespace TinyUa.Core.Binary
         public byte[]? ReadByteString()
         {
             var length = ReadInt32();
-            if (length < 0)
+            if (length < -1) throw new InvalidOperationException("Invalid negative length.");
+            if (length == -1)
                 return null;
 
             if (length == 0)
@@ -236,8 +240,8 @@ namespace TinyUa.Core.Binary
         /// <returns>A byte array containing the bytes read.</returns>
         public byte[] ReadBytes(int count)
         {
-            if (count <= 0) return Array.Empty<byte>();
-            if (_position + count > _count)
+            if (count == 0) return Array.Empty<byte>();
+            if (count < 0 || count > Remaining)
                 throw new InvalidOperationException($"Not enough data: need {count}, have {Remaining}");
             var result = new byte[count];
             Buffer.BlockCopy(_data, _offset + _position, result, 0, count);
@@ -264,7 +268,7 @@ namespace TinyUa.Core.Binary
         /// <returns>An array of decoded elements, or an empty array if length is zero or negative.</returns>
         public T[] ReadArray<T>(Func<T> readElement)
         {
-            var length = ReadInt32();
+            var length = ReadArrayLength();
             if (length <= 0)
                 return Array.Empty<T>();
 
@@ -290,7 +294,7 @@ namespace TinyUa.Core.Binary
         /// <returns>An array of decoded elements, or an empty array if length is zero or negative.</returns>
         public T[] ReadArray<T>(BinaryDecoderDelegate<T> readElement)
         {
-            var length = ReadInt32();
+            var length = ReadArrayLength();
             if (length <= 0)
                 return Array.Empty<T>();
 
@@ -313,11 +317,15 @@ namespace TinyUa.Core.Binary
         /// </summary>
         /// <param name="maxLength">Maximum number of elements allowed (default 1 Mi elements).</param>
         /// <returns>The validated length, or 0 if the prefix was ≤ 0.</returns>
-        public int ReadArrayLength(int maxLength = 0x100000)
+        public int ReadArrayLength(int maxLength = 0x100000) => ReadBoundedArrayLength(maxLength);
+
+        internal int ReadBoundedArrayLength(int maxLength = 0x100000, int minimumElementSize = 1, bool preserveNull = false)
         {
             var length = ReadInt32();
-            if (length <= 0) return 0;
-            if (length > Remaining)
+            if (length < -1) throw new InvalidOperationException("Invalid negative array length.");
+            if (length <= 0) return preserveNull && length == -1 ? -1 : 0;
+            if (minimumElementSize < 1) throw new ArgumentOutOfRangeException(nameof(minimumElementSize));
+            if (length > Remaining / minimumElementSize)
                 throw new InvalidOperationException(
                     $"Array length {length} exceeds remaining buffer ({Remaining} bytes)");
             if (length > maxLength)
@@ -333,7 +341,7 @@ namespace TinyUa.Core.Binary
         /// <exception cref="InvalidOperationException">Thrown when there are fewer than <paramref name="count"/> bytes remaining.</exception>
         public void Skip(int count)
         {
-            if (_position + count > _count)
+            if (count < 0 || count > Remaining)
                 throw new InvalidOperationException($"Cannot skip {count} bytes, only {Remaining} remaining");
             _position += count;
         }

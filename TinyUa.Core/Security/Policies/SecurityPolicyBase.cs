@@ -11,9 +11,6 @@ namespace TinyUa.Core.Security.Policies
         private AesCryptography? _symmetric;
         private int _asymmetricSignatureSize;
 
-        protected X509Certificate2? LocalCertificate;
-        protected X509Certificate2? RemoteCertificate;
-
         public override int SignatureKeySize => 32;
         public override int SymmetricSignatureSize => 32;
         public override int AsymmetricSignatureSize => _asymmetricSignatureSize;
@@ -46,8 +43,6 @@ namespace TinyUa.Core.Security.Policies
             ArgumentNullException.ThrowIfNull(localCert);
             ArgumentNullException.ThrowIfNull(remoteCert);
 
-            LocalCertificate = localCert;
-            RemoteCertificate = remoteCert;
             SecurityMode = mode;
 
             SenderCertificate = localCert.Export(X509ContentType.Cert);
@@ -58,15 +53,24 @@ namespace TinyUa.Core.Security.Policies
             var localPrivate = localCert.GetRSAPrivateKey()
                 ?? throw new CryptographicException(
                     "Local certificate does not contain an RSA private key.");
-            var remotePublic = remoteCert.GetRSAPublicKey()
-                ?? throw new CryptographicException(
-                    "Remote certificate does not contain an RSA public key.");
+            RSA? remotePublic = null;
+            try
+            {
+                remotePublic = remoteCert.GetRSAPublicKey()
+                    ?? throw new CryptographicException("Remote certificate does not contain an RSA public key.");
+                _asymmetricSignatureSize = localPrivate.KeySize / 8;
+                _asymmetric = CreateAsymmetricCryptography(localPrivate, remotePublic);
+                _symmetric = new AesCryptography(SignatureKeySize, SymmetricKeySize, 16, mode);
+            }
+            catch { localPrivate.Dispose(); remotePublic?.Dispose(); throw; }
+        }
 
-            _asymmetricSignatureSize = localPrivate.KeySize / 8;
-
-            _asymmetric = CreateAsymmetricCryptography(localPrivate, remotePublic);
-
-            _symmetric = new AesCryptography(SignatureKeySize, SymmetricKeySize, 16, mode);
+        public override void Dispose()
+        {
+            _asymmetric?.Dispose();
+            _symmetric?.Dispose();
+            _asymmetric = null;
+            _symmetric = null;
         }
 
         protected abstract RsaCryptography CreateAsymmetricCryptography(RSA localPrivate, RSA remotePublic);

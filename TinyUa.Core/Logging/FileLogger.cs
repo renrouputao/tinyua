@@ -28,6 +28,9 @@ namespace TinyUa.Core.Logging
         private Task? _writerTask;
         private const int MaxQueueSize = 4096;
         private int _droppedCount;
+        private int _signalled;
+        /// <summary>Most recent sink failure, if any.</summary>
+        public Exception? LastError { get; private set; }
 
         /// <summary>
         /// Gets the number of log entries that have been dropped due to a full queue (async mode only).
@@ -69,9 +72,8 @@ namespace TinyUa.Core.Logging
                 lock (_lock)
                 {
                     if (_stopping || _disposed) return;
-                    EnsureWriter();
-                    _writer!.WriteLine(line);
-                    _writer.Flush();
+                    WriteLineSafely(line);
+                    FlushSafely();
                 }
                 return;
             }
@@ -89,7 +91,7 @@ namespace TinyUa.Core.Logging
                 }
 
                 _queue.Enqueue(line);
-                _signal.Release();
+                if (Interlocked.Exchange(ref _signalled, 1) == 0) _signal.Release();
             }
         }
 
@@ -103,6 +105,7 @@ namespace TinyUa.Core.Logging
                 try
                 {
                     await _signal.WaitAsync(_cts.Token).ConfigureAwait(false);
+                    Interlocked.Exchange(ref _signalled, 0);
                 }
                 catch (OperationCanceledException) { break; }
 
@@ -110,14 +113,13 @@ namespace TinyUa.Core.Logging
                 {
                     lock (_lock)
                     {
-                        EnsureWriter();
-                        _writer!.WriteLine(line);
+                        WriteLineSafely(line);
                     }
                 }
 
                 lock (_lock)
                 {
-                    _writer?.Flush();
+                    FlushSafely();
                 }
             }
 
@@ -125,15 +127,35 @@ namespace TinyUa.Core.Logging
             {
                 lock (_lock)
                 {
-                    EnsureWriter();
-                    _writer!.WriteLine(line);
+                    WriteLineSafely(line);
                 }
             }
 
             lock (_lock)
             {
-                _writer?.Flush();
+                FlushSafely();
             }
+        }
+
+        private void WriteLineSafely(string line)
+        {
+            try { EnsureWriter(); _writer!.WriteLine(line); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
+            { LastError = ex; Interlocked.Increment(ref _droppedCount); ResetWriter(); }
+        }
+
+        private void FlushSafely()
+        {
+            try { _writer?.Flush(); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
+            { LastError = ex; ResetWriter(); }
+        }
+
+        private void ResetWriter()
+        {
+            try { _writer?.Dispose(); } catch { }
+            _writer = null;
+            _currentDate = null;
         }
 
         private static string FormatLine(LogLevel level, Exception? exception, string message)
@@ -164,12 +186,12 @@ namespace TinyUa.Core.Logging
 
         private static string LevelTag(LogLevel level) => level switch
         {
-            LogLevel.Trace       => "TRC",
-            LogLevel.Debug       => "DBG",
+            LogLevel.Trace => "TRC",
+            LogLevel.Debug => "DBG",
             LogLevel.Information => "INF",
-            LogLevel.Warning     => "WRN",
-            LogLevel.Error       => "ERR",
-            _                    => "???"
+            LogLevel.Warning => "WRN",
+            LogLevel.Error => "ERR",
+            _ => "???"
         };
 
         /// <summary>
@@ -187,22 +209,29 @@ namespace TinyUa.Core.Logging
 
             if (_async)
             {
-
                 _cts.Cancel();
-                try
-                {
-                    _writerTask?.Wait(TimeSpan.FromSeconds(5));
-                }
-                catch { }
-                _cts.Dispose();
-                _signal.Dispose();
+                var cleanup = FinishDisposeAsync();
+                try { cleanup.Wait(TimeSpan.FromSeconds(5)); } catch { }
+                return;
             }
 
+            CloseResources();
+        }
+
+        private async Task FinishDisposeAsync()
+        {
+            try { if (_writerTask != null) await _writerTask.ConfigureAwait(false); }
+            finally { CloseResources(); }
+        }
+
+        private void CloseResources()
+        {
             lock (_lock)
             {
                 _disposed = true;
-                _writer?.Dispose();
-                _writer = null;
+                ResetWriter();
+                _cts.Dispose();
+                _signal.Dispose();
             }
         }
     }

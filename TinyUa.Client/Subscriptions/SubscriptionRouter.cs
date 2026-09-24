@@ -26,14 +26,17 @@ namespace TinyUa.Client.Subscriptions
         internal void Register(uint subscriptionId, Subscription subscription)
             => _registry[subscriptionId] = subscription;
 
-        internal void Unregister(uint subscriptionId)
-            => _registry.TryRemove(subscriptionId, out _);
+        internal void Unregister(uint subscriptionId, Subscription subscription)
+            => ((ICollection<KeyValuePair<uint, Subscription>>)_registry)
+                .Remove(new KeyValuePair<uint, Subscription>(subscriptionId, subscription));
 
         internal bool TryGet(uint subscriptionId, out Subscription? subscription)
             => _registry.TryGetValue(subscriptionId, out subscription);
 
+        internal void ReportConnectionFailure(Exception exception) => _connection.ReportConnectionFailure(exception);
+
         internal async Task<CreateSubscriptionResponse> CreateSubscriptionAsync(double publishingInterval = 1000.0,
-            uint lifetimeCount = 3600, uint maxKeepAliveCount = 10)
+            uint lifetimeCount = 3600, uint maxKeepAliveCount = 10, CancellationToken cancellationToken = default)
         {
             var request = new CreateSubscriptionRequest
             {
@@ -45,12 +48,12 @@ namespace TinyUa.Client.Subscriptions
                     PublishingEnabled = true
                 }
             };
-            return await _connection.InvokeAsync<CreateSubscriptionRequest, CreateSubscriptionResponse>(request).ConfigureAwait(false);
+            return await _connection.InvokeAsync<CreateSubscriptionRequest, CreateSubscriptionResponse>(request, cancellationToken).ConfigureAwait(false);
         }
 
         internal async Task<MonitoredItemCreateResult[]?> CreateMonitoredItemsAsync(uint subscriptionId, NodeId[] nodeIds,
             AttributeId attributeId = AttributeId.Value, double samplingInterval = 1000.0,
-            uint[]? clientHandles = null, uint queueSize = 0)
+            uint[]? clientHandles = null, uint queueSize = 0, CancellationToken cancellationToken = default)
         {
             var items = new MonitoredItemCreateRequest[nodeIds.Length];
             for (int i = 0; i < nodeIds.Length; i++)
@@ -62,7 +65,9 @@ namespace TinyUa.Client.Subscriptions
                     RequestedParameters = new MonitoringParameters
                     {
                         ClientHandle = clientHandles != null && i < clientHandles.Length ? clientHandles[i] : (uint)(i + 1),
-                        SamplingInterval = samplingInterval, QueueSize = queueSize, DiscardOldest = true
+                        SamplingInterval = samplingInterval,
+                        QueueSize = queueSize,
+                        DiscardOldest = true
                     }
                 };
             }
@@ -70,31 +75,33 @@ namespace TinyUa.Client.Subscriptions
             {
                 Parameters = new CreateMonitoredItemsParameters
                 {
-                    SubscriptionId = subscriptionId, TimestampsToReturn = TimestampsToReturn.Both, ItemsToCreate = items
+                    SubscriptionId = subscriptionId,
+                    TimestampsToReturn = TimestampsToReturn.Both,
+                    ItemsToCreate = items
                 }
             };
-            var response = await _connection.InvokeAsync<CreateMonitoredItemsRequest, CreateMonitoredItemsResponse>(request).ConfigureAwait(false);
+            var response = await _connection.InvokeAsync<CreateMonitoredItemsRequest, CreateMonitoredItemsResponse>(request, cancellationToken).ConfigureAwait(false);
             return response.Results;
         }
 
-        internal async Task<StatusCode[]> DeleteMonitoredItemsAsync(uint subscriptionId, uint[] monitoredItemIds)
+        internal async Task<StatusCode[]> DeleteMonitoredItemsAsync(uint subscriptionId, uint[] monitoredItemIds, CancellationToken cancellationToken = default)
         {
             var request = new DeleteMonitoredItemsRequest
             {
                 Parameters = new DeleteMonitoredItemsParameters { SubscriptionId = subscriptionId, MonitoredItemIds = monitoredItemIds }
             };
 
-            var response = await _connection.InvokeAsync<DeleteMonitoredItemsRequest, DeleteMonitoredItemsResponse>(request).ConfigureAwait(false);
+            var response = await _connection.InvokeAsync<DeleteMonitoredItemsRequest, DeleteMonitoredItemsResponse>(request, cancellationToken).ConfigureAwait(false);
             return response.Results;
         }
 
-        internal async Task<StatusCode[]> DeleteSubscriptionsAsync(uint[] subscriptionIds)
+        internal async Task<StatusCode[]> DeleteSubscriptionsAsync(uint[] subscriptionIds, CancellationToken cancellationToken = default)
         {
             var request = new DeleteSubscriptionsRequest
             {
                 Parameters = new DeleteSubscriptionsParameters { SubscriptionIds = subscriptionIds }
             };
-            var response = await _connection.InvokeAsync<DeleteSubscriptionsRequest, DeleteSubscriptionsResponse>(request).ConfigureAwait(false);
+            var response = await _connection.InvokeAsync<DeleteSubscriptionsRequest, DeleteSubscriptionsResponse>(request, cancellationToken).ConfigureAwait(false);
             return response.Results;
         }
 

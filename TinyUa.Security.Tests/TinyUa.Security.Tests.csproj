@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <PackageReference Include="OPCFoundation.NetStandard.Opc.Ua" Version="1.5.374.126" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
     <PackageReference Include="coverlet.collector" Version="6.0.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.8.0" />
     <PackageReference Include="xunit" Version="2.5.3" />
@@ -20,6 +21,9 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Compile Include="..\TinyUa.Client.Tests\Testing\UaFaultProxy.cs" Link="Testing\UaFaultProxy.cs" />
+    <Compile Include="..\TinyUa.CertGen\CertificateFileGenerator.cs" Link="Testing\CertificateFileGenerator.cs" />
+    <Compile Include="..\TinyUa.Explorer\Services\SecuritySettingsStore.cs" Link="Testing\SecuritySettingsStore.cs" />
   </ItemGroup>
 
   <ItemGroup>

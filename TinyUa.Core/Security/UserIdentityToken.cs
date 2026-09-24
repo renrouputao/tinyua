@@ -49,6 +49,9 @@ namespace TinyUa.Core.Security
         /// </summary>
         public byte[]? SignatureData { get; set; }
 
+        /// <summary>Algorithm URI for the X509 user-token signature.</summary>
+        public string? SignatureAlgorithm { get; set; }
+
         /// <summary>
         /// Gets or sets the username for UserName token type.
         /// </summary>

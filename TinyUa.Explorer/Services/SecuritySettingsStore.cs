@@ -24,7 +24,12 @@ namespace TinyUa.Explorer.Services
 
         // Certificate options
         public string? CertificatePath { get; init; }
+        [JsonIgnore]
         public string? PrivateKeyPassword { get; init; }
+        public string? EncryptedPrivateKeyPasswordBase64 { get; init; }
+        [JsonPropertyName("PrivateKeyPassword")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? LegacyPrivateKeyPassword { get; init; }
         public bool AutoGenerateCert { get; init; } = true;
 
         /// <summary>Decrypted password (in-memory only). Never serialized — marked
@@ -41,9 +46,15 @@ namespace TinyUa.Explorer.Services
     /// </summary>
     public class SecuritySettingsStore
     {
-        private static readonly string SettingsFilePath = Path.Combine(
+        private readonly string SettingsFilePath;
+        private static readonly object SettingsLock = new();
+
+        public SecuritySettingsStore() : this(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "TinyUa.Explorer", "security_settings.json");
+            "TinyUa.Explorer", "security_settings.json"))
+        { }
+
+        internal SecuritySettingsStore(string path) => SettingsFilePath = path;
 
         // Fixed entropy prevents other apps' DPAPI blobs from being misread here; it need
         // not be secret — its purpose is namespacing, not confidentiality.
@@ -60,19 +71,25 @@ namespace TinyUa.Explorer.Services
         /// Windows user / different machine) — callers should re-prompt for credentials.</summary>
         public StoredSecuritySettings? Load(string endpointUrl)
         {
-            try
+            lock (SettingsLock)
             {
-                if (!File.Exists(SettingsFilePath)) return null;
-                var json = File.ReadAllText(SettingsFilePath);
-                var dict = JsonSerializer.Deserialize<Dictionary<string, StoredSecuritySettings>>(json, JsonOptions);
-                if (dict == null || !dict.TryGetValue(endpointUrl, out var s)) return null;
+                try
+                {
+                    if (!File.Exists(SettingsFilePath)) return null;
+                    var json = File.ReadAllText(SettingsFilePath);
+                    var dict = JsonSerializer.Deserialize<Dictionary<string, StoredSecuritySettings>>(json, JsonOptions);
+                    if (dict == null || !dict.TryGetValue(endpointUrl, out var s)) return null;
 
-                var plain = TryDecryptPassword(s.EncryptedPasswordBase64);
-                return s with { PlainPassword = plain };
-            }
-            catch
-            {
-                return null;
+                    var plain = TryDecryptPassword(s.EncryptedPasswordBase64);
+                    var keyPassword = TryDecryptPassword(s.EncryptedPrivateKeyPasswordBase64) ?? s.LegacyPrivateKeyPassword;
+                    var loaded = s with { PlainPassword = plain, PrivateKeyPassword = keyPassword };
+                    if (dict.Values.Any(x => x.LegacyPrivateKeyPassword != null)) Save(endpointUrl, loaded);
+                    return loaded with { LegacyPrivateKeyPassword = null };
+                }
+                catch
+                {
+                    return null;
+                }
             }
         }
 
@@ -81,23 +98,37 @@ namespace TinyUa.Explorer.Services
         /// experience, they don't break connection.</summary>
         public void Save(string endpointUrl, StoredSecuritySettings settings)
         {
-            try
+            lock (SettingsLock)
             {
-                var dict = new Dictionary<string, StoredSecuritySettings>();
-                if (File.Exists(SettingsFilePath))
+                try
                 {
-                    var json = File.ReadAllText(SettingsFilePath);
-                    var existing = JsonSerializer.Deserialize<Dictionary<string, StoredSecuritySettings>>(json, JsonOptions);
-                    if (existing != null) dict = existing;
+                    var dict = new Dictionary<string, StoredSecuritySettings>();
+                    if (File.Exists(SettingsFilePath))
+                    {
+                        var json = File.ReadAllText(SettingsFilePath);
+                        var existing = JsonSerializer.Deserialize<Dictionary<string, StoredSecuritySettings>>(json, JsonOptions);
+                        if (existing != null) dict = existing;
+                    }
+                    dict[endpointUrl] = settings;
+                    foreach (var key in dict.Keys.ToArray())
+                    {
+                        var entry = dict[key];
+                        var password = entry.PrivateKeyPassword ?? entry.LegacyPrivateKeyPassword;
+                        var encrypted = password != null ? EncryptPassword(password) : entry.EncryptedPrivateKeyPasswordBase64;
+                        if (!string.IsNullOrEmpty(password) && encrypted == null)
+                            throw new CryptographicException("Cannot protect certificate password.");
+                        dict[key] = entry with { EncryptedPrivateKeyPasswordBase64 = encrypted, LegacyPrivateKeyPassword = null };
+                    }
+                    var dir = Path.GetDirectoryName(SettingsFilePath);
+                    if (dir != null) Directory.CreateDirectory(dir);
+                    var temporary = SettingsFilePath + ".tmp";
+                    File.WriteAllText(temporary, JsonSerializer.Serialize(dict, JsonOptions));
+                    File.Move(temporary, SettingsFilePath, overwrite: true);
                 }
-                dict[endpointUrl] = settings;
-                var dir = Path.GetDirectoryName(SettingsFilePath);
-                if (dir != null) Directory.CreateDirectory(dir);
-                File.WriteAllText(SettingsFilePath, JsonSerializer.Serialize(dict, JsonOptions));
-            }
-            catch
-            {
-                /* best-effort persistence */
+                catch
+                {
+                    /* best-effort persistence */
+                }
             }
         }
 
@@ -105,12 +136,13 @@ namespace TinyUa.Explorer.Services
         /// base64-encoded blob, or null if the input is empty or encryption fails.</summary>
         public static string? EncryptPassword(string? plain)
         {
+            if (!OperatingSystem.IsWindows()) return null;
             if (string.IsNullOrEmpty(plain)) return null;
             try
             {
                 var bytes = Encoding.UTF8.GetBytes(plain);
-                var encrypted = ProtectedData.Protect(bytes, Entropy, DataProtectionScope.CurrentUser);
-                return Convert.ToBase64String(encrypted);
+                try { return Convert.ToBase64String(ProtectedData.Protect(bytes, Entropy, DataProtectionScope.CurrentUser)); }
+                finally { CryptographicOperations.ZeroMemory(bytes); }
             }
             catch
             {
@@ -120,12 +152,14 @@ namespace TinyUa.Explorer.Services
 
         private static string? TryDecryptPassword(string? base64)
         {
+            if (!OperatingSystem.IsWindows()) return null;
             if (string.IsNullOrEmpty(base64)) return null;
             try
             {
                 var encrypted = Convert.FromBase64String(base64);
                 var bytes = ProtectedData.Unprotect(encrypted, Entropy, DataProtectionScope.CurrentUser);
-                return Encoding.UTF8.GetString(bytes);
+                try { return Encoding.UTF8.GetString(bytes); }
+                finally { CryptographicOperations.ZeroMemory(bytes); }
             }
             catch
             {

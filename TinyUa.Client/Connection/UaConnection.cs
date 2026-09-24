@@ -14,7 +14,7 @@ using TinyUa.Client.Services;
 namespace TinyUa.Client.Connection
 {
 
-    internal class UaConnection : IDisposable
+    internal class UaConnection : IDisposable, IAsyncDisposable
     {
         private readonly int _timeout;
         private readonly ILogger _logger;
@@ -23,16 +23,25 @@ namespace TinyUa.Client.Connection
         private NodeId? _sessionId;
         private NodeId? _authenticationToken;
         private uint _requestHandle;
+        private Task? _disposeTask;
 
         private byte[]? _serverCertificate;
         private byte[]? _serverNonce;
+        private CreateSessionResponse? _sessionResponse;
+        internal double RevisedSessionTimeout { get; private set; }
+        internal UserIdentityToken BuildIdentity(UserIdentityOptions options, string endpointUrl)
+        {
+            var response = _sessionResponse ?? throw new InvalidOperationException("No session metadata.");
+            response.ServerNonce = _serverNonce;
+            return TinyUa.Client.Security.UserIdentityFactory.Build(options, response, _securityPolicy, UserTokenPolicyId, endpointUrl);
+        }
 
         internal NodeId? SessionId => _sessionId;
         internal NodeId? AuthenticationToken => _authenticationToken;
         internal string? UserTokenPolicyId { get; set; }
         internal uint RevisedChannelLifetime => _socket?.RevisedChannelLifetime ?? 3600000;
 
-            internal bool IsAlive => _socket?.IsAlive ?? false;
+        internal bool IsAlive => _socket?.IsAlive ?? false;
 
         /// <summary>Milliseconds since the last request was sent, or <see cref="long.MaxValue"/> when not connected.</summary>
         internal long IdleMilliseconds => _socket?.IdleMilliseconds ?? long.MaxValue;
@@ -53,7 +62,11 @@ namespace TinyUa.Client.Connection
 
         internal void SetSecurityPolicy(SecurityPolicy policy)
         {
+            var previous = _securityPolicy;
             _securityPolicy = policy ?? new NoneSecurityPolicy();
+            if (ReferenceEquals(previous, _securityPolicy)) return;
+            if (_socket != null) _socket.RetirePolicyAsync(previous).Forget(_logger, "Retire security policy");
+            else previous.Dispose();
             if (_socket != null)
             {
                 _logger.LogDebug($"SecurityPolicy changed to {_securityPolicy.Uri} (existing socket will be recreated on next ConnectAsync)");
@@ -67,6 +80,7 @@ namespace TinyUa.Client.Connection
             if (_socket != null)
             {
                 _socket.ConnectionLost -= OnSocketConnectionLost;
+                await _socket.DisconnectAsync().ConfigureAwait(false);
                 _socket.Dispose();
             }
             _socket = new UaSocketClient(_timeout, _securityPolicy, _logger);
@@ -78,6 +92,8 @@ namespace TinyUa.Client.Connection
         {
             ConnectionLost?.Invoke(ex);
         }
+
+        internal void ReportConnectionFailure(Exception exception) => ConnectionLost?.Invoke(exception);
 
         internal void Disconnect() => _socket?.Disconnect();
 
@@ -139,7 +155,7 @@ namespace TinyUa.Client.Connection
             CancellationToken cancellationToken = default)
             => await _socket!.OpenSecureChannelAsync(parameters, cancellationToken).ConfigureAwait(false);
 
-        internal async Task<OpenSecureChannelResult> RenewSecureChannelAsync(uint requestedLifetime = 3600000)
+        internal async Task<OpenSecureChannelResult> RenewSecureChannelAsync(uint requestedLifetime = 3600000, CancellationToken cancellationToken = default)
         {
             var nonce = new byte[_securityPolicy.NonceLength];
             if (nonce.Length > 0)
@@ -152,7 +168,7 @@ namespace TinyUa.Client.Connection
                 ClientNonce = nonce.Length > 0 ? nonce : null,
                 RequestedLifetime = requestedLifetime
             };
-            return await OpenSecureChannelAsync(parameters).ConfigureAwait(false);
+            return await OpenSecureChannelAsync(parameters, cancellationToken).ConfigureAwait(false);
         }
 
         internal async Task CloseSecureChannelAsync()
@@ -216,6 +232,8 @@ namespace TinyUa.Client.Connection
 
             _serverCertificate = response.ServerCertificate;
             _serverNonce = response.ServerNonce;
+            _sessionResponse = response;
+            RevisedSessionTimeout = response.RevisedSessionTimeout;
 
             return response;
         }
@@ -223,22 +241,24 @@ namespace TinyUa.Client.Connection
         internal async Task ActivateSessionAsync(UserIdentityToken? userIdentity = null,
             CancellationToken cancellationToken = default)
         {
-            var parameters = new ActivateSessionParameters { UserIdentity = userIdentity };
+            var parameters = new ActivateSessionParameters { UserIdentity = userIdentity, UserTokenSignature = new SignatureData { Algorithm = userIdentity?.SignatureAlgorithm, Signature = userIdentity?.SignatureData } };
             ComputeClientSignature(parameters);
 
             var request = new ActivateSessionRequest { Parameters = parameters };
-            await InvokeAsync<ActivateSessionRequest, ActivateSessionResponse>(request, cancellationToken).ConfigureAwait(false);
+            var response = await InvokeAsync<ActivateSessionRequest, ActivateSessionResponse>(request, cancellationToken).ConfigureAwait(false);
+            _serverNonce = response.ServerNonce;
         }
 
-        internal async Task ActivateSessionAsync(NodeId sessionId, NodeId authenticationToken, UserIdentityToken? userIdentity = null)
+        internal async Task ActivateSessionAsync(NodeId sessionId, NodeId authenticationToken, UserIdentityToken? userIdentity = null, CancellationToken cancellationToken = default)
         {
             _authenticationToken = authenticationToken;
             _sessionId = sessionId;
-            var parameters = new ActivateSessionParameters { UserIdentity = userIdentity };
+            var parameters = new ActivateSessionParameters { UserIdentity = userIdentity, UserTokenSignature = new SignatureData { Algorithm = userIdentity?.SignatureAlgorithm, Signature = userIdentity?.SignatureData } };
             ComputeClientSignature(parameters);
 
             var request = new ActivateSessionRequest { Parameters = parameters };
-            await InvokeAsync<ActivateSessionRequest, ActivateSessionResponse>(request).ConfigureAwait(false);
+            var response = await InvokeAsync<ActivateSessionRequest, ActivateSessionResponse>(request, cancellationToken).ConfigureAwait(false);
+            _serverNonce = response.ServerNonce;
         }
 
         private void ComputeClientSignature(ActivateSessionParameters parameters)
@@ -298,17 +318,17 @@ namespace TinyUa.Client.Connection
                     "Server signature verification failed — the server may not hold the private key for its certificate (possible MITM)");
         }
 
-        internal async Task<NotificationMessage> RepublishAsync(uint subscriptionId, uint sequenceNumber)
+        internal async Task<NotificationMessage> RepublishAsync(uint subscriptionId, uint sequenceNumber, CancellationToken cancellationToken = default)
         {
             var request = new RepublishRequest
             {
                 Parameters = new RepublishParameters { SubscriptionId = subscriptionId, RetransmitSequenceNumber = sequenceNumber }
             };
-            var response = await InvokeAsync<RepublishRequest, RepublishResponse>(request).ConfigureAwait(false);
+            var response = await InvokeAsync<RepublishRequest, RepublishResponse>(request, cancellationToken).ConfigureAwait(false);
             return response.NotificationMessage;
         }
 
-        internal async Task<BrowseResult[]?> BrowseAsync(NodeId nodeId, BrowseDirection direction = BrowseDirection.Forward, uint maxReferences = 100)
+        internal async Task<BrowseResult[]?> BrowseAsync(NodeId nodeId, BrowseDirection direction = BrowseDirection.Forward, uint maxReferences = 100, CancellationToken cancellationToken = default)
         {
             var request = new BrowseRequest
             {
@@ -322,32 +342,33 @@ namespace TinyUa.Client.Connection
                     }}
                 }
             };
-            var response = await InvokeAsync<BrowseRequest, BrowseResponse>(request).ConfigureAwait(false);
+            var response = await InvokeAsync<BrowseRequest, BrowseResponse>(request, cancellationToken).ConfigureAwait(false);
             return response.Results;
         }
 
-        internal async Task<BrowseResult[]?> BrowseNextAsync(byte[] continuationPoint)
+        internal async Task<BrowseResult[]?> BrowseNextAsync(byte[] continuationPoint, CancellationToken cancellationToken = default)
         {
             var request = new BrowseNextRequest
             {
                 ReleaseContinuationPoints = false,
                 ContinuationPoints = new[] { continuationPoint }
             };
-            var response = await InvokeAsync<BrowseNextRequest, BrowseNextResponse>(request).ConfigureAwait(false);
+            var response = await InvokeAsync<BrowseNextRequest, BrowseNextResponse>(request, cancellationToken).ConfigureAwait(false);
             return response.Results;
         }
 
-        internal async Task<DataValue[]?> ReadAsync(NodeId nodeId, AttributeId attributeId = AttributeId.Value)
+        internal async Task<DataValue[]?> ReadAsync(NodeId nodeId, AttributeId attributeId = AttributeId.Value, CancellationToken cancellationToken = default)
         {
             var request = new ReadRequest
             {
                 Parameters = new ReadParameters
                 {
-                    MaxAge = 0, TimestampsToReturn = TimestampsToReturn.Both,
+                    MaxAge = 0,
+                    TimestampsToReturn = TimestampsToReturn.Both,
                     NodesToRead = new[] { new ReadValueId { NodeId = nodeId, AttributeId = attributeId } }
                 }
             };
-            var response = await InvokeAsync<ReadRequest, ReadResponse>(request).ConfigureAwait(false);
+            var response = await InvokeAsync<ReadRequest, ReadResponse>(request, cancellationToken).ConfigureAwait(false);
             return response.Results;
         }
 
@@ -364,6 +385,7 @@ namespace TinyUa.Client.Connection
             };
             var response = await InvokeAsync<ReadRequest, ReadResponse>(request, cancellationToken).ConfigureAwait(false);
 
+            if (response.Results?.Length != nodeIds.Length) throw new UaException(0x80070000, "Read result count mismatch.");
             var results = new ReadResult[nodeIds.Length];
             for (int i = 0; i < nodeIds.Length; i++)
             {
@@ -378,23 +400,24 @@ namespace TinyUa.Client.Connection
             return results;
         }
 
-        internal async Task<StatusCode?> WriteAsync(NodeId nodeId, DataValue value)
+        internal async Task<StatusCode?> WriteAsync(NodeId nodeId, DataValue value, CancellationToken cancellationToken = default)
         {
-            var results = await WriteAsync(new[] { new WriteValue { NodeId = nodeId, Value = value } }).ConfigureAwait(false);
+            var results = await WriteAsync(new[] { new WriteValue { NodeId = nodeId, Value = value } }, cancellationToken).ConfigureAwait(false);
             return results != null && results.Length > 0 ? results[0].StatusCode : null;
         }
 
         internal async Task<StatusCode?> WriteAsync(NodeId nodeId, object value, VariantType? variantType = null)
             => await WriteAsync(nodeId, new DataValue(new Variant(value, variantType))).ConfigureAwait(false);
 
-        internal async Task<WriteResult[]?> WriteAsync(WriteValue[] nodesToWrite)
+        internal async Task<WriteResult[]?> WriteAsync(WriteValue[] nodesToWrite, CancellationToken cancellationToken = default)
         {
             var request = new WriteRequest
             {
                 Parameters = new WriteParameters { NodesToWrite = nodesToWrite }
             };
-            var response = await InvokeAsync<WriteRequest, WriteResponse>(request).ConfigureAwait(false);
+            var response = await InvokeAsync<WriteRequest, WriteResponse>(request, cancellationToken).ConfigureAwait(false);
 
+            if (response.Results?.Length != nodesToWrite.Length) throw new UaException(0x80070000, "Write result count mismatch.");
             var results = new WriteResult[nodesToWrite.Length];
             for (int i = 0; i < nodesToWrite.Length; i++)
                 results[i] = new WriteResult { NodeId = nodesToWrite[i].NodeId, StatusCode = response.Results?[i] ?? StatusCode.Bad };
@@ -438,8 +461,24 @@ namespace TinyUa.Client.Connection
 
         public void Dispose()
         {
-            Disconnect();
-            _socket?.Dispose();
+            DisposeAsync().AsTask().Forget(_logger, "Dispose connection");
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            _disposeTask ??= DisposeOwnedResourcesAsync();
+            return new ValueTask(_disposeTask);
+        }
+
+        private async Task DisposeOwnedResourcesAsync()
+        {
+            if (_socket != null)
+            {
+                _socket.ConnectionLost -= OnSocketConnectionLost;
+                await _socket.RetirePolicyAsync(_securityPolicy).ConfigureAwait(false);
+                _socket.Dispose();
+            }
+            else _securityPolicy.Dispose();
         }
     }
 }

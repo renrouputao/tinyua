@@ -114,7 +114,7 @@ namespace TinyUa.Client.Services
         public static DataChangeNotificationData Decode(BinaryDecoder decoder)
         {
             var data = new DataChangeNotificationData();
-            var count = decoder.ReadInt32();
+            var count = decoder.ReadArrayLength();
             for (int i = 0; i < count; i++)
             {
                 data.Notifications.Add(MonitoredItemNotification.Decode(decoder));
@@ -185,7 +185,7 @@ namespace TinyUa.Client.Services
         {
             var result = new PublishResult();
             result.SubscriptionId = decoder.ReadUInt32();
-            var availableCount = decoder.ReadInt32();
+            var availableCount = decoder.ReadBoundedArrayLength(minimumElementSize: 4);
             result.AvailableSequenceNumbers = availableCount > 0 ? new uint[availableCount] : Array.Empty<uint>();
             for (int i = 0; i < availableCount; i++)
             {
@@ -193,7 +193,7 @@ namespace TinyUa.Client.Services
             }
             result.MoreNotifications = decoder.ReadBoolean();
             result.NotificationMessage = NotificationMessage.Decode(decoder);
-            var resultsCount = decoder.ReadArrayLength();
+            var resultsCount = decoder.ReadBoundedArrayLength(minimumElementSize: 4);
             result.Results = resultsCount > 0 ? new StatusCode[resultsCount] : Array.Empty<StatusCode>();
             for (int i = 0; i < resultsCount; i++)
             {

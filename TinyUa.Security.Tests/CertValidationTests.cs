@@ -43,7 +43,7 @@ public sealed class CertValidationTests
     }
 
     [Fact]
-    public void ValidateTinyUaClientCert_WithFixtureValidator_ReportsExactError()
+    public async Task ValidateTinyUaClientCert_WithFixtureValidator_ReportsExactError()
     {
         // ---- 1. Build a CertificateValidator from the fixture's SecurityConfiguration -
         // The fixture's ApplicationConfiguration.SecurityConfiguration has the same
@@ -62,7 +62,7 @@ public sealed class CertValidationTests
         _output.WriteLine($"[Step 1] MinimumCertificateKeySize: {appConfig.SecurityConfiguration.MinimumCertificateKeySize}");
 
         var validator = new Opc.Ua.CertificateValidator();
-        validator.Update(appConfig.SecurityConfiguration).GetAwaiter().GetResult();
+        await validator.Update(appConfig.SecurityConfiguration);
         // Set the application certificate so InternalValidateAsync can compare against it
         // (line 1005 of CertificateValidator.cs checks m_applicationCertificate).
         typeof(Opc.Ua.CertificateValidator)

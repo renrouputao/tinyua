@@ -505,6 +505,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
         }
         catch (Exception ex)
         {
+            foreach (var pending in Subscriptions.Where(r => r.Subscription == null).ToArray())
+                Subscriptions.Remove(pending);
             StatusText = $"Subscribe failed: {ex.Message}";
         }
     }

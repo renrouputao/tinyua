@@ -163,57 +163,35 @@ namespace TinyUa.Core.Types
                 return new NodeId();
 
             ushort ns = 0;
-            string? identifier = null;
-            NodeIdType type = NodeIdType.Numeric;
-
-            var parts = value.Split(';');
-            foreach (var part in parts)
+            uint serverIndex = 0;
+            string? namespaceUri = null;
+            var remaining = value;
+            while (true)
             {
-                if (string.IsNullOrWhiteSpace(part))
-                    continue;
-
-                var kv = part.Split(new[] { '=' }, 2);
-                if (kv.Length != 2)
-                    continue;
-
-                var key = kv[0].Trim();
-                var val = kv[1].Trim();
-
-                switch (key)
-                {
-                    case "ns":
-                        ns = ushort.Parse(val);
-                        break;
-                    case "i":
-                        type = NodeIdType.Numeric;
-                        identifier = val;
-                        break;
-                    case "s":
-                        type = NodeIdType.String;
-                        identifier = val;
-                        break;
-                    case "g":
-                        type = NodeIdType.Guid;
-                        identifier = val;
-                        break;
-                    case "b":
-                        type = NodeIdType.ByteString;
-                        identifier = val;
-                        break;
-                }
+                int separator = remaining.IndexOf(';');
+                if (remaining.StartsWith("ns=", StringComparison.Ordinal) && separator >= 0)
+                    ns = ushort.Parse(remaining.AsSpan(3, separator - 3));
+                else if (remaining.StartsWith("srv=", StringComparison.Ordinal) && separator >= 0)
+                    serverIndex = uint.Parse(remaining.AsSpan(4, separator - 4));
+                else if (remaining.StartsWith("nsu=", StringComparison.Ordinal) && separator >= 0)
+                    namespaceUri = Uri.UnescapeDataString(remaining.Substring(4, separator - 4));
+                else break;
+                remaining = remaining[(separator + 1)..];
             }
-
-            if (identifier == null)
+            if (remaining.Length < 2 || remaining[1] != '=')
                 throw new FormatException("Invalid NodeId format: missing identifier");
-
-            return type switch
+            string identifier = remaining[2..];
+            NodeId result = remaining[0] switch
             {
-                NodeIdType.Numeric => new NodeId(uint.Parse(identifier), ns),
-                NodeIdType.String => new NodeId(identifier, ns),
-                NodeIdType.Guid => new NodeId(Guid.Parse(identifier), ns),
-                NodeIdType.ByteString => new NodeId(Convert.FromBase64String(identifier), ns),
-                _ => throw new FormatException($"Unsupported NodeIdType: {type}")
+                'i' => new NodeId(uint.Parse(identifier), ns),
+                's' => new NodeId(identifier, ns),
+                'g' => new NodeId(Guid.Parse(identifier), ns),
+                'b' => new NodeId(Convert.FromBase64String(identifier), ns),
+                _ => throw new FormatException("Unsupported NodeId identifier type")
             };
+            result.NamespaceUri = namespaceUri;
+            result.ServerIndex = serverIndex;
+            return result;
         }
 
         /// <summary>
@@ -268,13 +246,15 @@ namespace TinyUa.Core.Types
                 NodeIdType.ByteString => $"b={Convert.ToBase64String((byte[])_reference!)}",
                 _ => $"i=0"
             };
-            parts.Add(idStr);
+
 
             if (ServerIndex > 0)
                 parts.Add($"srv={ServerIndex}");
 
             if (!string.IsNullOrEmpty(NamespaceUri))
-                parts.Add($"nsu={NamespaceUri}");
+                parts.Add($"nsu={Uri.EscapeDataString(NamespaceUri)}");
+
+            parts.Add(idStr);
 
             return string.Join(";", parts);
         }
@@ -289,7 +269,8 @@ namespace TinyUa.Core.Types
             if (other is null)
                 return false;
 
-            if (NamespaceIndex != other.NamespaceIndex || NodeIdType != other.NodeIdType)
+            if (NamespaceIndex != other.NamespaceIndex || NodeIdType != other.NodeIdType
+                || NamespaceUri != other.NamespaceUri || ServerIndex != other.ServerIndex)
                 return false;
 
             return NodeIdType switch
@@ -297,6 +278,7 @@ namespace TinyUa.Core.Types
                 // Numeric identifiers compare without boxing — this is the hot path for
                 // monitored-item routing and dictionary lookups.
                 NodeIdType.TwoByte or NodeIdType.FourByte or NodeIdType.Numeric => _numeric == other._numeric,
+                NodeIdType.ByteString => ((byte[])_reference!).AsSpan().SequenceEqual((byte[])other._reference!),
                 _ => Equals(_reference, other._reference)
             };
         }
@@ -320,9 +302,10 @@ namespace TinyUa.Core.Types
             int identifierHash = NodeIdType switch
             {
                 NodeIdType.TwoByte or NodeIdType.FourByte or NodeIdType.Numeric => _numeric.GetHashCode(),
+                NodeIdType.ByteString => ByteHash((byte[])_reference!),
                 _ => _reference?.GetHashCode() ?? 0
             };
-            return HashCode.Combine(NamespaceIndex, NodeIdType, identifierHash);
+            return HashCode.Combine(NamespaceIndex, NodeIdType, identifierHash, NamespaceUri, ServerIndex);
         }
 
         /// <summary>
@@ -339,13 +322,27 @@ namespace TinyUa.Core.Types
             if (result != 0)
                 return result;
 
+            result = string.Compare(NamespaceUri, other.NamespaceUri, StringComparison.Ordinal);
+            if (result != 0) return result;
+            result = ServerIndex.CompareTo(other.ServerIndex);
+            if (result != 0) return result;
+            result = NodeIdType.CompareTo(other.NodeIdType);
+            if (result != 0) return result;
             return NodeIdType switch
             {
+                NodeIdType.ByteString => ((byte[])_reference!).AsSpan().SequenceCompareTo((byte[])other._reference!),
                 NodeIdType.TwoByte or NodeIdType.FourByte or NodeIdType.Numeric => _numeric.CompareTo(other._numeric),
                 NodeIdType.String => string.Compare((string?)_reference, (string?)other._reference, StringComparison.Ordinal),
                 NodeIdType.Guid => ((Guid)_reference!).CompareTo((Guid)other._reference!),
                 _ => 0
             };
+        }
+
+        private static int ByteHash(byte[] bytes)
+        {
+            var hash = new HashCode();
+            hash.AddBytes(bytes);
+            return hash.ToHashCode();
         }
 
         internal void SetFrom(NodeId other)

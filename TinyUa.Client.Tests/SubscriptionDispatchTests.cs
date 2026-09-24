@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using TinyUa.Client.Services;
 using TinyUa.Client.Subscriptions;
+using TinyUa.Core.Types;
+using TinyUa.Core.Binary;
 
 namespace TinyUa.Client.Tests;
 
@@ -35,18 +37,18 @@ public class SubscriptionDispatchTests
 
         try
         {
-            subscription.OnKeepAlive += () =>
+            subscription.OnDataChange += (_, _, _) =>
             {
                 observed.Enqueue(subscription.LastSequenceNumber);
                 callbackEntered.Set();
                 releaseCallback.Wait(TimeSpan.FromSeconds(5));
             };
 
-            await subscription.EnqueuePublishResponseAsync(CreateKeepAlive(1));
+            await subscription.EnqueuePublishResponseAsync(CreateDataNotification(1));
             Assert.True(callbackEntered.Wait(TimeSpan.FromSeconds(2)));
 
-            await subscription.EnqueuePublishResponseAsync(CreateKeepAlive(2));
-            var thirdEnqueue = subscription.EnqueuePublishResponseAsync(CreateKeepAlive(3));
+            await subscription.EnqueuePublishResponseAsync(CreateDataNotification(2));
+            var thirdEnqueue = subscription.EnqueuePublishResponseAsync(CreateDataNotification(3));
 
             await Task.Delay(100);
             Assert.False(thirdEnqueue.IsCompleted);
@@ -75,16 +77,16 @@ public class SubscriptionDispatchTests
 
         try
         {
-            subscription.OnKeepAlive += () =>
+            subscription.OnDataChange += (_, _, _) =>
             {
                 callbackEntered.Set();
                 releaseCallback.Wait(TimeSpan.FromSeconds(5));
             };
 
-            await subscription.EnqueuePublishResponseAsync(CreateKeepAlive(1));
+            await subscription.EnqueuePublishResponseAsync(CreateDataNotification(1));
             Assert.True(callbackEntered.Wait(TimeSpan.FromSeconds(2)));
-            await subscription.EnqueuePublishResponseAsync(CreateKeepAlive(2));
-            await subscription.EnqueuePublishResponseAsync(CreateKeepAlive(3));
+            await subscription.EnqueuePublishResponseAsync(CreateDataNotification(2));
+            await subscription.EnqueuePublishResponseAsync(CreateDataNotification(3));
 
             Assert.Equal(1, subscription.DroppedNotificationMessages);
             Assert.Equal(3u, subscription.LastSequenceNumber);
@@ -100,7 +102,9 @@ public class SubscriptionDispatchTests
         }
     }
 
-    private static Subscription CreateSubscription(NotificationOverflowPolicy overflowPolicy) => new(
+    private static Subscription CreateSubscription(NotificationOverflowPolicy overflowPolicy)
+    {
+        var sub = new Subscription(
         router: null!,
         subscriptionId: 1,
         publishingInterval: 1000,
@@ -111,15 +115,30 @@ public class SubscriptionDispatchTests
             QueueCapacity = 1,
             OverflowPolicy = overflowPolicy
         });
+        sub.MonitoredItems[1] = new MonitoredItem { ClientHandle = 1, NodeId = new NodeId(2258u) };
+        return sub;
+    }
 
-    private static PublishResponse CreateKeepAlive(uint sequenceNumber) => new()
+    private static PublishResponse CreateDataNotification(uint sequenceNumber)
     {
-        Parameters = new PublishResult
+        using var encoder = new BinaryEncoder();
+        encoder.WriteInt32(1);
+        encoder.WriteUInt32(1);
+        new DataValue((object)sequenceNumber).Encode(encoder);
+        encoder.WriteInt32(0);
+        return new PublishResponse
         {
-            SubscriptionId = 1,
-            NotificationMessage = new NotificationMessage { SequenceNumber = sequenceNumber }
-        }
-    };
+            Parameters = new PublishResult
+            {
+                SubscriptionId = 1,
+                NotificationMessage = new NotificationMessage
+                {
+                    SequenceNumber = sequenceNumber,
+                    NotificationData = new() { new ExtensionObject { TypeId = new NodeId(811u), Encoding = 1, Body = encoder.ToByteArray() } }
+                }
+            }
+        };
+    }
 
     private static async Task WaitUntilAsync(Func<bool> predicate)
     {

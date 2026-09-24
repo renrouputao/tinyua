@@ -31,6 +31,23 @@ namespace TinyUa.Transport
         // chunks could still retain arbitrary memory before a final chunk arrives.
         private const int MaxIncomingChunkCount = 1024;
         private const int MaxIncomingMessageSize = 64 * 1024 * 1024;
+        private int _receiveMessageLimit = MaxIncomingMessageSize;
+        private int _receiveChunkLimit = MaxIncomingChunkCount;
+        private uint _sendMessageLimit;
+        private uint _sendChunkLimit;
+
+        internal void SetReceiveLimits(uint messageSize, uint chunkCount)
+        {
+            _receiveMessageLimit = messageSize == 0 ? MaxIncomingMessageSize : (int)Math.Min(messageSize, MaxIncomingMessageSize);
+            _receiveChunkLimit = chunkCount == 0 ? MaxIncomingChunkCount : (int)Math.Min(chunkCount, MaxIncomingChunkCount);
+        }
+
+        private void ValidateSend(int bodyLength, int chunks)
+        {
+            if ((_sendMessageLimit != 0 && bodyLength > _sendMessageLimit)
+                || (_sendChunkLimit != 0 && chunks > _sendChunkLimit))
+                throw new UaException(0x80B80000, "Request exceeds the server's negotiated message/chunk limit.");
+        }
         private uint _sequenceNumber;
         private uint? _peerSequenceNumber;
         private readonly List<MessageChunk> _incomingParts;
@@ -44,8 +61,8 @@ namespace TinyUa.Transport
         internal ChannelSecurityToken SecurityToken { get; }
         internal ChannelSecurityToken NextSecurityToken { get; }
         internal ChannelSecurityToken PrevSecurityToken { get; }
-        internal byte[] LocalNonce { get; private set; }
-        internal byte[] RemoteNonce { get; private set; }
+        internal byte[]? LocalNonce { get; private set; }
+        internal byte[]? RemoteNonce { get; private set; }
 
         internal SecureConnection(SecurityPolicy securityPolicy)
         {
@@ -65,7 +82,7 @@ namespace TinyUa.Transport
 
         internal bool IsOpen => _isOpen;
 
-        internal void SetChannel(ChannelSecurityToken token, SecurityTokenRequestType requestType, byte[] clientNonce, byte[]? serverNonce = null)
+        internal void SetChannel(ChannelSecurityToken token, SecurityTokenRequestType requestType, byte[]? clientNonce, byte[]? serverNonce = null)
         {
             lock (_tokenLock)
             {
@@ -216,11 +233,25 @@ namespace TinyUa.Transport
         /// <summary>Builds independently sendable chunks and assigns their sequence numbers.</summary>
         internal List<MessageChunk> CreateMessageChunks(ArraySegment<byte> message, byte[] messageType, uint requestId)
         {
+            var capacity = MessageChunk.MaxBodySize(SecurityPolicy.SymmetricCryptography, _maxChunkSize);
+            if (capacity <= 0) throw new UaException(0x80B80000, "Negotiated chunk cannot contain a message body.");
+            var count = MessageType.Equals(messageType, MessageType.SecureOpen) ? 1
+                : Math.Max(1, checked((int)(((long)message.Count + capacity - 1) / capacity)));
+            ValidateSend(message.Count, count);
             uint channelId = SecurityToken.ChannelId;
             uint tokenId = SecurityToken.TokenId;
 
             if (MessageType.Equals(messageType, MessageType.SecureOpen))
             {
+                var crypto = SecurityPolicy.AsymmetricCryptography;
+                var payload = checked(8 + message.Count);
+                var plain = checked(payload + crypto.Padding(payload).Length + crypto.SignatureSize);
+                var protectedSize = crypto.PlainBlockSize > 1
+                    ? checked(plain / crypto.PlainBlockSize * crypto.EncryptedBlockSize) : plain;
+                var securityHeaderSize = 12 + System.Text.Encoding.UTF8.GetByteCount(SecurityPolicy.Uri)
+                    + (SecurityPolicy.SenderCertificate?.Length ?? 0) + (SecurityPolicy.ReceiverThumbprint?.Length ?? 0);
+                if ((long)12 + securityHeaderSize + protectedSize > _maxChunkSize)
+                    throw new UaException(0x80B80000, "OpenSecureChannel exceeds the negotiated chunk limit.");
                 if (!_isOpen)
                 {
                     channelId = 0;
@@ -257,6 +288,7 @@ namespace TinyUa.Transport
 
         internal byte[] MessageToBinary(ArraySegment<byte> body, byte[]? messageType = null, uint requestId = 0)
         {
+            ValidateSend(body.Count, 1);
             messageType ??= MessageType.SecureMessage;
 
             if (MessageType.Equals(messageType, MessageType.SecureOpen))
@@ -305,6 +337,7 @@ namespace TinyUa.Transport
         internal bool TryWriteUnsecuredMessageHeader(
             ArraySegment<byte> body, byte[] messageType, uint requestId, Span<byte> destination)
         {
+            ValidateSend(body.Count, 1);
             if (destination.Length < 24
                 || MessageType.Equals(messageType, MessageType.SecureOpen)
                 || SecurityPolicy.SymmetricCryptography.SignatureSize != 0
@@ -327,7 +360,7 @@ namespace TinyUa.Transport
             return true;
         }
 
-        internal object ReceiveFromHeaderAndBody(Header header, byte[] body)
+        internal object? ReceiveFromHeaderAndBody(Header header, byte[] body)
             => ReceiveFromHeaderAndBody(header, new ArraySegment<byte>(body));
 
         /// <summary>
@@ -335,7 +368,7 @@ namespace TinyUa.Transport
         /// borrowed for this synchronous call; message payloads that outlive it are copied by the
         /// decoder, which avoids the former full-frame body allocation on every receive.
         /// </summary>
-        internal object ReceiveFromHeaderAndBody(Header header, ArraySegment<byte> body)
+        internal object? ReceiveFromHeaderAndBody(Header header, ArraySegment<byte> body)
         {
 
             if (body.Array == null)
@@ -393,6 +426,8 @@ namespace TinyUa.Transport
             if (acknowledge.ReceiveBufferSize < 8192 || localSendBufferSize < 8192)
                 throw new UaException(0x80810000, "Negotiated UA TCP buffer size is smaller than 8192 bytes.");
             _maxChunkSize = checked((int)Math.Min(localSendBufferSize, acknowledge.ReceiveBufferSize));
+            _sendMessageLimit = acknowledge.MaxMessageSize;
+            _sendChunkLimit = acknowledge.MaxChunkCount;
         }
 
         private void CheckSymmetricHeader(SymmetricAlgorithmHeader header)
@@ -437,11 +472,11 @@ namespace TinyUa.Transport
             PrevSecurityToken.RevisedLifetime = 0;
         }
 
-        private object Receive(MessageChunk chunk)
+        private object? Receive(MessageChunk chunk)
         {
             CheckIncomingChunk(chunk);
-            if (_incomingParts.Count >= MaxIncomingChunkCount
-                || chunk.Body.Length > MaxIncomingMessageSize - _incomingMessageSize)
+            if (_incomingParts.Count >= _receiveChunkLimit
+                || chunk.Body.Length > _receiveMessageLimit - _incomingMessageSize)
             {
                 _incomingParts.Clear();
                 _incomingMessageSize = 0;
@@ -534,7 +569,7 @@ namespace TinyUa.Transport
         internal MessageSecurityMode SecurityMode { get; set; }
 
         /// <summary>Gets or sets the client-generated nonce for key derivation.</summary>
-        internal byte[] ClientNonce { get; set; }
+        internal byte[]? ClientNonce { get; set; }
 
         /// <summary>Gets or sets the requested lifetime of the security token in milliseconds.</summary>
         internal uint RequestedLifetime { get; set; }

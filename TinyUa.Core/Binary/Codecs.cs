@@ -186,6 +186,7 @@ namespace TinyUa.Core.Binary
                 encodingByte |= 0x80;
                 if (variant.Dimensions != null && variant.Dimensions.Length > 0)
                 {
+                    ValidateDimensions(variant.Dimensions, ((Array)variant.Value!).Length);
                     encodingByte |= 0x40;
                 }
             }
@@ -197,6 +198,7 @@ namespace TinyUa.Core.Binary
                 EncodeArrayValue(encoder, variant);
                 if (variant.Dimensions != null && variant.Dimensions.Length > 0)
                 {
+                    encoder.WriteInt32(variant.Dimensions.Length);
                     foreach (var dim in variant.Dimensions)
                     {
                         encoder.WriteInt32(dim);
@@ -211,79 +213,80 @@ namespace TinyUa.Core.Binary
 
         private static void EncodeScalarValue(BinaryEncoder encoder, Variant variant)
         {
-                switch (variant.VariantType)
-                {
-                    case VariantType.Boolean:
-                        encoder.WriteBoolean((bool)variant.Value!);
-                        break;
-                    case VariantType.SByte:
-                        encoder.WriteSByte((sbyte)variant.Value!);
-                        break;
-                    case VariantType.Byte:
-                        encoder.WriteByte((byte)variant.Value!);
-                        break;
-                    case VariantType.Int16:
-                        encoder.WriteInt16((short)variant.Value!);
-                        break;
-                    case VariantType.UInt16:
-                        encoder.WriteUInt16((ushort)variant.Value!);
-                        break;
-                    case VariantType.Int32:
-                        encoder.WriteInt32((int)variant.Value!);
-                        break;
-                    case VariantType.UInt32:
-                        encoder.WriteUInt32((uint)variant.Value!);
-                        break;
-                    case VariantType.Int64:
-                        encoder.WriteInt64((long)variant.Value!);
-                        break;
-                    case VariantType.UInt64:
-                        encoder.WriteUInt64((ulong)variant.Value!);
-                        break;
-                    case VariantType.Float:
-                        encoder.WriteFloat((float)variant.Value!);
-                        break;
-                    case VariantType.Double:
-                        encoder.WriteDouble((double)variant.Value!);
-                        break;
-                    case VariantType.String:
-                        encoder.WriteString((string?)variant.Value);
-                        break;
-                    case VariantType.DateTime:
-                        encoder.WriteDateTime((DateTime)variant.Value!);
-                        break;
-                    case VariantType.Guid:
-                        encoder.WriteGuid((Guid)variant.Value!);
-                        break;
-                    case VariantType.ByteString:
-                        encoder.WriteByteString((byte[]?)variant.Value);
-                        break;
-                    case VariantType.NodeId:
-                    case VariantType.ExpandedNodeId:
-                        NodeIdCodec.Encode(encoder, (NodeId)variant.Value!);
-                        break;
-                    case VariantType.StatusCode:
-                        encoder.WriteUInt32(((StatusCode)variant.Value!).Value);
-                        break;
-                    case VariantType.QualifiedName:
-                        ((QualifiedName)variant.Value!).Encode(encoder);
-                        break;
-                    case VariantType.LocalizedText:
-                        ((LocalizedText)variant.Value!).Encode(encoder);
-                        break;
-                    case VariantType.ExtensionObject:
-                        ((ExtensionObject)variant.Value!).Encode(encoder);
-                        break;
-                    case VariantType.DataValue:
-                        ((DataValue)variant.Value!).Encode(encoder);
-                        break;
-                    default:
-                        throw new UaException(0x80000000, $"Unsupported VariantType: {variant.VariantType}");
-                }
+            switch (variant.VariantType)
+            {
+                case VariantType.Boolean:
+                    encoder.WriteBoolean((bool)variant.Value!);
+                    break;
+                case VariantType.SByte:
+                    encoder.WriteSByte((sbyte)variant.Value!);
+                    break;
+                case VariantType.Byte:
+                    encoder.WriteByte((byte)variant.Value!);
+                    break;
+                case VariantType.Int16:
+                    encoder.WriteInt16((short)variant.Value!);
+                    break;
+                case VariantType.UInt16:
+                    encoder.WriteUInt16((ushort)variant.Value!);
+                    break;
+                case VariantType.Int32:
+                    encoder.WriteInt32((int)variant.Value!);
+                    break;
+                case VariantType.UInt32:
+                    encoder.WriteUInt32((uint)variant.Value!);
+                    break;
+                case VariantType.Int64:
+                    encoder.WriteInt64((long)variant.Value!);
+                    break;
+                case VariantType.UInt64:
+                    encoder.WriteUInt64((ulong)variant.Value!);
+                    break;
+                case VariantType.Float:
+                    encoder.WriteFloat((float)variant.Value!);
+                    break;
+                case VariantType.Double:
+                    encoder.WriteDouble((double)variant.Value!);
+                    break;
+                case VariantType.String:
+                    encoder.WriteString((string?)variant.Value);
+                    break;
+                case VariantType.DateTime:
+                    encoder.WriteDateTime((DateTime)variant.Value!);
+                    break;
+                case VariantType.Guid:
+                    encoder.WriteGuid((Guid)variant.Value!);
+                    break;
+                case VariantType.ByteString:
+                    encoder.WriteByteString((byte[]?)variant.Value);
+                    break;
+                case VariantType.NodeId:
+                case VariantType.ExpandedNodeId:
+                    NodeIdCodec.Encode(encoder, (NodeId)variant.Value!);
+                    break;
+                case VariantType.StatusCode:
+                    encoder.WriteUInt32(((StatusCode)variant.Value!).Value);
+                    break;
+                case VariantType.QualifiedName:
+                    ((QualifiedName)variant.Value!).Encode(encoder);
+                    break;
+                case VariantType.LocalizedText:
+                    ((LocalizedText)variant.Value!).Encode(encoder);
+                    break;
+                case VariantType.ExtensionObject:
+                    ((ExtensionObject)variant.Value!).Encode(encoder);
+                    break;
+                case VariantType.DataValue:
+                    ((DataValue)variant.Value!).Encode(encoder);
+                    break;
+                default:
+                    throw new UaException(0x80000000, $"Unsupported VariantType: {variant.VariantType}");
             }
+        }
 
         private static void EncodeArrayValue(BinaryEncoder encoder, Variant variant)
         {
+            if (variant.Value == null) { encoder.WriteInt32(-1); return; }
             var array = (Array)variant.Value!;
             var length = array.Length;
 
@@ -342,9 +345,8 @@ namespace TinyUa.Core.Binary
                     return;
             }
 
-            for (int i = 0; i < length; i++)
+            foreach (var item in array)
             {
-                var item = array.GetValue(i);
                 EncodeScalarValue(encoder, new Variant(item, variant.VariantType));
             }
         }
@@ -380,18 +382,32 @@ namespace TinyUa.Core.Binary
             int[]? dimensions = null;
             if (hasDimensions)
             {
-                var dimCount = decoder.ReadInt32();
-                if (dimCount < 0 || dimCount > decoder.Remaining / 4)
-                    throw new UaException(0x80000000,
-                        $"Invalid variant dimension count: {dimCount}");
+                if (!isArray) throw new UaException(0x80070000, "Scalar Variant cannot have dimensions.");
+                var dimCount = decoder.ReadBoundedArrayLength(32, 4);
                 dimensions = new int[dimCount];
                 for (int i = 0; i < dimCount; i++)
                 {
                     dimensions[i] = decoder.ReadInt32();
                 }
+                if (value == null) throw new UaException(0x80070000, "Null array cannot have dimensions.");
+                ValidateDimensions(dimensions, ((Array)value).Length);
             }
 
             return new Variant(value, type) { Dimensions = dimensions, IsArray = isArray };
+        }
+
+        private static void ValidateDimensions(int[] dimensions, int length)
+        {
+            if (dimensions.Length == 0 || dimensions.Length > 32)
+                throw new UaException(0x80070000, "Invalid Variant dimension count.");
+            long product = 1;
+            foreach (int dimension in dimensions)
+            {
+                if (dimension < 0 || (dimension != 0 && product > int.MaxValue / dimension))
+                    throw new UaException(0x80070000, "Invalid Variant dimensions.");
+                product *= dimension;
+            }
+            if (product != length) throw new UaException(0x80070000, "Variant dimensions do not match array length.");
         }
 
         private static object DecodeScalarValue(BinaryDecoder decoder, VariantType type)
@@ -424,51 +440,52 @@ namespace TinyUa.Core.Binary
             };
         }
 
-        private static Array DecodeArrayValue(BinaryDecoder decoder, VariantType type)
+        private static Array? DecodeArrayValue(BinaryDecoder decoder, VariantType type)
         {
-            var length = decoder.ReadInt32();
-            if (length < 0)
-                return Array.Empty<object>();
+            var length = decoder.ReadBoundedArrayLength(minimumElementSize: type switch
+            {
+                VariantType.Int16 or VariantType.UInt16 => 2,
+                VariantType.Int32 or VariantType.UInt32 or VariantType.Float or VariantType.StatusCode => 4,
+                VariantType.Int64 or VariantType.UInt64 or VariantType.Double or VariantType.DateTime => 8,
+                VariantType.Guid => 16,
+                _ => 1
+            }, preserveNull: true);
 
-            // Guard against a malformed/hostile length prefix over-allocating: every element
-            // consumes at least one byte, so a valid count cannot exceed the bytes remaining.
-            if (length > decoder.Remaining)
-                throw new UaException(0x80000000,
-                    $"Array length {length} exceeds remaining buffer ({decoder.Remaining} bytes)");
+            if (length == -1) return null;
 
             // Typed fast paths: avoid Array.CreateInstance + boxed SetValue per element.
             switch (type)
             {
                 case VariantType.Boolean:
-                { var a = new bool[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadBoolean(); return a; }
+                    { var a = new bool[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadBoolean(); return a; }
                 case VariantType.SByte:
-                { var a = new sbyte[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadSByte(); return a; }
+                    { var a = new sbyte[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadSByte(); return a; }
                 case VariantType.Byte:
-                { var a = new byte[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadByte(); return a; }
+                    { var a = new byte[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadByte(); return a; }
                 case VariantType.Int16:
-                { var a = new short[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadInt16(); return a; }
+                    { var a = new short[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadInt16(); return a; }
                 case VariantType.UInt16:
-                { var a = new ushort[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadUInt16(); return a; }
+                    { var a = new ushort[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadUInt16(); return a; }
                 case VariantType.Int32:
-                { var a = new int[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadInt32(); return a; }
+                    { var a = new int[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadInt32(); return a; }
                 case VariantType.UInt32:
-                { var a = new uint[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadUInt32(); return a; }
+                    { var a = new uint[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadUInt32(); return a; }
                 case VariantType.Int64:
-                { var a = new long[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadInt64(); return a; }
+                    { var a = new long[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadInt64(); return a; }
                 case VariantType.UInt64:
-                { var a = new ulong[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadUInt64(); return a; }
+                    { var a = new ulong[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadUInt64(); return a; }
                 case VariantType.Float:
-                { var a = new float[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadFloat(); return a; }
+                    { var a = new float[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadFloat(); return a; }
                 case VariantType.Double:
-                { var a = new double[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadDouble(); return a; }
+                    { var a = new double[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadDouble(); return a; }
                 case VariantType.String:
-                { var a = new string?[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadString(); return a; }
+                    { var a = new string?[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadString(); return a; }
                 case VariantType.DateTime:
-                { var a = new DateTime[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadDateTime(); return a; }
+                    { var a = new DateTime[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadDateTime(); return a; }
                 case VariantType.Guid:
-                { var a = new Guid[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadGuid(); return a; }
+                    { var a = new Guid[length]; for (int i = 0; i < length; i++) a[i] = decoder.ReadGuid(); return a; }
                 case VariantType.StatusCode:
-                { var a = new Types.StatusCode[length]; for (int i = 0; i < length; i++) a[i] = new Types.StatusCode(decoder.ReadUInt32()); return a; }
+                    { var a = new Types.StatusCode[length]; for (int i = 0; i < length; i++) a[i] = new Types.StatusCode(decoder.ReadUInt32()); return a; }
             }
 
             var elementType = GetElementType(type);
